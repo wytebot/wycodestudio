@@ -2,6 +2,7 @@ import React,{useEffect,useState}from"react";
 import{createRoot}from"react-dom/client";
 import{getAuth,onAuthStateChanged,signInWithPopup,signOut,GoogleAuthProvider}from"firebase/auth";
 import{getFirestore,addDoc,collection,doc,onSnapshot,serverTimestamp,updateDoc}from"firebase/firestore";
+import{getStorage,ref as storageRef,uploadBytes,getDownloadURL}from"firebase/storage";
 import{initializeApp}from"firebase/app";
 import{LayoutDashboard,Package,ShoppingBag,Users,Settings as SettingsIcon,Plus,Search,LogOut,Pencil,Trash2,X,LockKeyhole}from"lucide-react";
 import"./styles.css";
@@ -18,6 +19,7 @@ const firebaseConfig={
 const app=initializeApp(firebaseConfig);
 const auth=getAuth(app);
 const db=getFirestore(app);
+const storage=getStorage(app);
 const ADMIN_EMAILS=["frenemy566@gmail.com"];
 const provider=new GoogleAuthProvider();
 provider.setCustomParameters({prompt:"select_account"});
@@ -79,12 +81,31 @@ function Orders({o}){return <section className="panel table"><h2>Orders</h2>{o.l
 function Customers({c}){return <section className="panel table"><h2>Customers</h2>{c.length?c.map(x=><div className="tr" key={x.id}><span>{x.email||"—"}</span><span>{x.name||"—"}</span><span>{x.orders||0}</span><span>Customer</span><span/></div>):<p>No customers yet.</p>}</section>}
 function Settings({user}){return <section className="panel"><h2>Studio settings</h2><p>Admin: <b>{user.email}</b></p><div className="security"><LockKeyhole size={20}/><span>Keep Flutterwave secrets and Google Drive credentials server-side. This Studio stores only Drive file IDs.</span></div></section>}
 function Modal({p,close,save}){
- const fields=["name","slug","description","price","version","demoUrl","coverUrl","features","requirements","license"];
+ const fields=["name","slug","description","price","version","demoUrl","features","requirements","license"];
  const[saleType,setSaleType]=useState(p.saleType==="special"?"special":"normal");
  const[driveFileId,setDriveFileId]=useState(p.driveFileId||"");
  const[fileName,setFileName]=useState("");
  const[uploading,setUploading]=useState(false);
  const[uploadMsg,setUploadMsg]=useState("");
+ const[coverUrl,setCoverUrl]=useState(p.coverUrl||"");
+ const[coverUploading,setCoverUploading]=useState(false);
+ const[coverMsg,setCoverMsg]=useState("");
+ async function handleCover(e){
+  const file=e.target.files?.[0];
+  if(!file)return;
+  if(!file.type.startsWith("image/")){setCoverMsg("Please choose an image file.");return}
+  setCoverUploading(true);setCoverMsg(`Uploading ${file.name}…`);
+  try{
+   if(!auth.currentUser)throw new Error("Your session expired. Sign in again.");
+   const safeName=file.name.replace(/[^a-zA-Z0-9.\-_]/g,"_");
+   const path=`covers/${Date.now()}-${safeName}`;
+   const r=storageRef(storage,path);
+   await uploadBytes(r,file,{contentType:file.type});
+   const url=await getDownloadURL(r);
+   setCoverUrl(url);setCoverMsg(`Uploaded "${file.name}" ✓`);
+  }catch(err){setCoverMsg(err.message||"Upload failed")}
+  finally{setCoverUploading(false)}
+ }
  async function handleFile(e){
   const file=e.target.files?.[0];
   if(!file)return;
@@ -105,7 +126,7 @@ function Modal({p,close,save}){
   }catch(err){setUploadMsg(err.message||"Upload failed")}
   finally{setUploading(false)}
  }
- return <div className="back"><form className="modal" onSubmit={save}><div className="modalhead"><h2>{p.id?"Edit product":"Add product"}</h2><button type="button" onClick={close} aria-label="Close"><X/></button></div><div className="form">{fields.map(k=><label key={k}>{k}<input name={k} defaultValue={p[k]??""} required={["name","description","price","version","currency"].includes(k)} type={k==="price"?"number":"text"} min={k==="price"?"0.01":undefined} step={k==="price"?"0.01":undefined}/></label>)}<label>Add file (uploads straight to Drive){fileName&&<small> — {fileName}</small>}<input type="file" onChange={handleFile} disabled={uploading}/></label>{uploadMsg&&<small className="notice" style={{gridColumn:"1 / -1"}}>{uploadMsg}</small>}<label>Google Drive file ID{driveFileId?"":" (or upload a file above)"}<input name="driveFileId" value={driveFileId} onChange={e=>setDriveFileId(e.target.value)} placeholder="Auto-filled after upload, or paste manually"/></label><label>Currency<select name="currency" defaultValue={p.currency||"USD"}><option>USD</option><option>NGN</option><option>GBP</option><option>EUR</option><option>CAD</option><option>AUD</option></select></label><label>Status<select name="status" defaultValue={p.status}><option>draft</option><option>published</option><option>archived</option></select></label><label>Category<select name="category" defaultValue={p.category}><option>Developer Tools</option><option>Productivity</option><option>Business</option><option>Creative</option><option>Utilities</option><option>Other</option></select></label><label>Sale type<select name="saleType" value={saleType} onChange={e=>setSaleType(e.target.value)}><option value="normal">Normal sale</option><option value="special">Special sale (rollercoaster carousel)</option></select></label>{saleType==="special"&&<label>Special sale banner image URL (recommended 520×280px, a big clear rectangle)<input name="bannerUrl" defaultValue={p.bannerUrl??""} placeholder="https://.../banner-520x280.png"/></label>}</div><button className="primary" type="submit" disabled={uploading}>{uploading?"Uploading file…":"Save product"}</button></form></div>}
+ return <div className="back"><form className="modal" onSubmit={save}><div className="modalhead"><h2>{p.id?"Edit product":"Add product"}</h2><button type="button" onClick={close} aria-label="Close"><X/></button></div><div className="form">{fields.map(k=><label key={k}>{k}<input name={k} defaultValue={p[k]??""} required={["name","description","price","version","currency"].includes(k)} type={k==="price"?"number":"text"} min={k==="price"?"0.01":undefined} step={k==="price"?"0.01":undefined}/></label>)}<label>Add file (uploads straight to Drive){fileName&&<small> — {fileName}</small>}<input type="file" onChange={handleFile} disabled={uploading}/></label>{uploadMsg&&<small className="notice" style={{gridColumn:"1 / -1"}}>{uploadMsg}</small>}<label>Google Drive file ID{driveFileId?"":" (or upload a file above)"}<input name="driveFileId" value={driveFileId} onChange={e=>setDriveFileId(e.target.value)} placeholder="Auto-filled after upload, or paste manually"/></label><label>Cover image (recommended 800×400px){coverUrl&&<img src={coverUrl} alt="Cover preview" style={{display:"block",width:"100%",maxWidth:"220px",height:"110px",objectFit:"cover",borderRadius:"8px",margin:"6px 0"}}/>}<input type="file" accept="image/*" onChange={handleCover} disabled={coverUploading}/></label>{coverMsg&&<small className="notice" style={{gridColumn:"1 / -1"}}>{coverMsg}</small>}<input type="hidden" name="coverUrl" value={coverUrl} readOnly/><label>Currency<select name="currency" defaultValue={p.currency||"USD"}><option>USD</option><option>NGN</option><option>GBP</option><option>EUR</option><option>CAD</option><option>AUD</option></select></label><label>Status<select name="status" defaultValue={p.status}><option>draft</option><option>published</option><option>archived</option></select></label><label>Category<select name="category" defaultValue={p.category}><option>Developer Tools</option><option>Productivity</option><option>Business</option><option>Creative</option><option>Utilities</option><option>Other</option></select></label><label>Sale type<select name="saleType" value={saleType} onChange={e=>setSaleType(e.target.value)}><option value="normal">Normal sale</option><option value="special">Special sale (rollercoaster carousel)</option></select></label>{saleType==="special"&&<label>Special sale banner image URL (recommended 520×280px, a big clear rectangle)<input name="bannerUrl" defaultValue={p.bannerUrl??""} placeholder="https://.../banner-520x280.png"/></label>}</div><button className="primary" type="submit" disabled={uploading||coverUploading}>{uploading?"Uploading file…":coverUploading?"Uploading cover…":"Save product"}</button></form></div>}
 function Login({onLogin,msg}){return <div className="center"><div className="login"><div className="logo big">W</div><h1>WyCode Studio</h1><p>Private control center for your source-code marketplace.</p>{msg&&<div className="notice">{msg}</div>}<button className="primary full" onClick={onLogin}>Continue with Google</button></div></div>}
 function Denied({onLogout,email}){return <div className="center"><div className="login"><LockKeyhole/><h1>Access denied</h1><p>{email} is not authorized to access this private Studio.</p><button onClick={onLogout}>Sign out</button></div></div>}
 createRoot(document.getElementById("root")).render(<App/>);

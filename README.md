@@ -1,4 +1,4 @@
-# WyCode Studio v1.0.7
+# WyCode Studio v1.0.9
 
 Private admin dashboard for the WyCode source-code marketplace.
 
@@ -22,6 +22,11 @@ Admin allowlist is also hardcoded to `frenemy566@gmail.com`.
 2. Create/enable Firestore Database.
 3. Add the deployed Vercel domain to Firebase Authentication → Settings → Authorized domains.
 4. Publish `firestore.rules.example` as your production Firestore rules.
+5. Enable Firebase Storage and publish `storage.rules.example` as your production Storage rules (needed for the cover image picker below — public read, admin-only write).
+
+## Cover images
+
+The product form's "Cover image" field is a direct picker — no URL typing. Selecting an image uploads it straight to Firebase Storage (client-side, using the admin's existing sign-in) and stores the resulting public download URL as the product's `coverUrl`. Recommended size: **800×400px** (2:1) — matches how covers are cropped on the storefront cards. Requires Firebase Storage to be enabled and `storage.rules.example` published (see above); no new environment variables needed for this one, since it doesn't go through the API — just Firebase directly.
 
 ## File uploads (api/upload.js)
 
@@ -58,6 +63,7 @@ npm run dev
 - Product search
 - Product status/category/version/pricing metadata
 - Direct file upload to Google Drive, with manual Drive file ID override
+- Direct cover image picker (Firebase Storage), no manual URL entry
 - Normal vs. special sale type, with a special-sale banner image field
 - Orders and customers dashboard views
 - Revenue/paid-order metrics
