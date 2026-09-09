@@ -1,4 +1,4 @@
-# WyCode Studio v1.0.9
+# WyCode Studio v1.1.6
 
 Private admin dashboard for the WyCode source-code marketplace.
 
@@ -33,12 +33,19 @@ The product form's "Cover image" field uploads the selected image directly to th
 Adding a product now has an "Add file" box that uploads the selected file straight into your shared Google Drive folder and fills in the resulting Drive file ID automatically — no more copying IDs by hand.
 
 Setup required in your Vercel project (Settings → Environment Variables), see `.env.example`:
-- `GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON` — a Google Cloud service account key (JSON) with Editor access. Share your Drive folder with the service account's `client_email`.
+- `GOOGLE_DRIVE_OAUTH_CLIENT_ID` — OAuth 2.0 client ID from Google Cloud.
+- `GOOGLE_DRIVE_OAUTH_CLIENT_SECRET` — OAuth 2.0 client secret from the same client. Server-side only.
+- `GOOGLE_DRIVE_OAUTH_REFRESH_TOKEN` — long-lived OAuth refresh token for the permitted Studio owner Google account. Server-side only; never expose it as a `VITE_*` variable.
 - `GOOGLE_DRIVE_FOLDER_ID` — destination folder for product source ZIP files. Normal covers and special covers use their dedicated fixed Drive folders.
 
 Notes:
-- The upload endpoint verifies the admin's Firebase sign-in token server-side before touching Drive — no extra login step needed in the UI.
+- The upload endpoint verifies the admin's Firebase sign-in token server-side before touching Drive — no extra login step is needed in the Studio UI.
+- Drive access uses OAuth 2.0 on behalf of the permitted owner Google account, so files are stored in that account's Drive instead of relying on a service-account storage quota. The API also checks the connected Drive account email before uploading.
 - Direct uploads are intentionally capped below Vercel Hobby request-body limits. For larger source zips, upload directly to Drive and paste the file ID into the "Google Drive file ID" field; the manual override remains supported.
+
+## Drive connection test
+
+The Settings page includes a **Test connection** button. It authenticates the current Studio admin session, checks the server-side Google OAuth refresh token, verifies the connected Drive account, and reports configuration/authentication/folder-access problems without exposing OAuth secrets to the browser.
 
 ## Deployment
 
@@ -71,7 +78,7 @@ npm run dev
 
 ## Security boundary
 
-The Studio frontend bundle must never contain Flutterwave secret keys, Google Drive service-account credentials, or payment-verification secrets. Those live only in `api/upload.js`, which runs server-side on Vercel — the browser only ever sees the admin's own Firebase sign-in token and the resulting Drive file ID.
+The Studio frontend bundle must never contain Flutterwave secret keys, Google OAuth client secrets, Google Drive refresh tokens, or payment-verification secrets. Those live only in server-side Vercel environment variables and `api/upload.js` — the browser only ever sees the admin's own Firebase sign-in token and the resulting Drive file ID.
 
 Before accepting real purchases, implement the shared server-side backend for:
 1. Flutterwave payment verification.
@@ -95,3 +102,44 @@ Direct source ZIP uploads are limited to 3 MB and cover images to 2 MB to leave 
 - Special cover (`kind: special-cover`) → `1cbtAwTafxCKtaT8SzjW-0XCo66J4hQ5T`.
 
 The frontend pickers send these exact `kind` values to `/api/upload`; the API rejects unknown kinds instead of silently treating them as source uploads.
+
+## Google Drive OAuth 2.0 setup (Option B — personal Google Drive)
+
+This build no longer requires a Google service account. It uses a server-side OAuth refresh token belonging to the permitted Studio owner account (`frenemy566@gmail.com`).
+
+### 1. Create an OAuth client in Google Cloud
+1. Open Google Cloud Console and select the project used for the Drive integration.
+2. Enable **Google Drive API**.
+3. Configure the OAuth consent screen. If the app is **External** and still in Testing, add the permitted owner Google account as a test user.
+4. Create an **OAuth client ID**. A Desktop app client is the simplest choice when generating a refresh token manually.
+
+### 2. Generate a refresh token
+Use a trusted OAuth 2.0 authorization flow/tool with the same OAuth client, requesting the scope:
+`https://www.googleapis.com/auth/drive`
+
+The authorization must be completed while signed in as the permitted owner account. Request offline access so Google returns a refresh token. Keep the refresh token private.
+
+If using Google's OAuth 2.0 Playground, configure it to use your own OAuth client credentials, authorize the Drive scope, exchange the authorization code for tokens, and copy the returned **refresh token**.
+
+### 3. Add these Vercel Production variables
+- `GOOGLE_DRIVE_OAUTH_CLIENT_ID` = OAuth client ID
+- `GOOGLE_DRIVE_OAUTH_CLIENT_SECRET` = OAuth client secret
+- `GOOGLE_DRIVE_OAUTH_REFRESH_TOKEN` = refresh token
+- `GOOGLE_DRIVE_FOLDER_ID` = source ZIP destination folder ID
+
+Do **not** prefix these with `VITE_`. Do not put the refresh token or client secret in `src/main.jsx`.
+
+### 4. Folder permissions
+The source, normal-cover, and special-cover folders must be accessible by the Google account that owns the refresh token. For a personal Drive folder owned by that account, no service-account sharing is required.
+
+### 5. Redeploy and test
+After saving the Production variables, redeploy the Studio. Sign in with the allowed Studio admin account, upload a small ZIP, and verify the file appears in the configured Drive folder. The API checks the OAuth-connected Drive email before performing the upload, so accidentally using another Google account produces a clear error instead of silently storing files in the wrong Drive.
+
+### OAuth troubleshooting
+- **`MISSING_GOOGLE_OAUTH`**: one or more of the three OAuth variables is missing in Vercel Production.
+- **`DRIVE_AUTH_FAILED`**: the client credentials or refresh token is invalid/revoked. Generate a new refresh token and redeploy.
+- **`DRIVE_ACCOUNT_MISMATCH`**: the refresh token belongs to a different Google account than the Studio owner.
+- **`DRIVE_FOLDER_PERMISSION`**: the connected Google account cannot edit the destination folder.
+- **`DRIVE_QUOTA`**: the connected Google Drive is out of storage/quota.
+
+The refresh token is long-lived but can be revoked by Google or by changing the account's security/consent state. If that happens, generate a replacement refresh token and update the Vercel variable.

@@ -34,6 +34,9 @@ async function readBody(req) {
 }
 
 let driveClient;
+
+const REQUIRED_OAUTH_EMAIL = ADMIN_EMAILS[0];
+
 function configError(message, status = 503, code = 'DRIVE_CONFIG') {
   const e = new Error(message);
   e.status = status;
@@ -43,34 +46,47 @@ function configError(message, status = 503, code = 'DRIVE_CONFIG') {
 
 function getDrive() {
   if (driveClient) return driveClient;
-  const raw = String(process.env.GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON || '').trim();
-  if (!raw) {
+
+  const clientId = String(process.env.GOOGLE_DRIVE_OAUTH_CLIENT_ID || '').trim();
+  const clientSecret = String(process.env.GOOGLE_DRIVE_OAUTH_CLIENT_SECRET || '').trim();
+  const refreshToken = String(process.env.GOOGLE_DRIVE_OAUTH_REFRESH_TOKEN || '').trim();
+
+  if (!clientId || !clientSecret || !refreshToken) {
     throw configError(
-      'Google Drive service-account credentials are missing from this deployment. Add GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON to the Studio Vercel Production environment, then redeploy.',
+      'Google Drive OAuth is not configured for this deployment. Add GOOGLE_DRIVE_OAUTH_CLIENT_ID, GOOGLE_DRIVE_OAUTH_CLIENT_SECRET, and GOOGLE_DRIVE_OAUTH_REFRESH_TOKEN to the Studio Vercel Production environment, then redeploy.',
       503,
-      'MISSING_SERVICE_ACCOUNT'
+      'MISSING_GOOGLE_OAUTH'
     );
   }
-  let sa;
-  try {
-    sa = JSON.parse(raw);
-  } catch {
-    throw configError(
-      'GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON exists, but its value is not valid JSON. Paste the complete Google service-account JSON into the Studio Vercel Production environment, then redeploy.',
-      503,
-      'INVALID_SERVICE_ACCOUNT_JSON'
-    );
-  }
-  if (!sa || sa.type !== 'service_account' || !sa.client_email || !sa.private_key) {
-    throw configError(
-      'GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON is present, but it is missing required service-account fields (type, client_email, or private_key). Replace it with the complete Google service-account JSON and redeploy.',
-      503,
-      'INCOMPLETE_SERVICE_ACCOUNT'
-    );
-  }
-  const auth = new google.auth.GoogleAuth({ credentials: sa, scopes: ['https://www.googleapis.com/auth/drive'] });
-  driveClient = google.drive({ version: 'v3', auth });
+
+  const oauth2 = new google.auth.OAuth2(clientId, clientSecret);
+  oauth2.setCredentials({ refresh_token: refreshToken });
+  driveClient = google.drive({ version: 'v3', auth: oauth2 });
   return driveClient;
+}
+
+async function verifyDriveAccount(drive) {
+  try {
+    const about = await drive.about.get({ fields: 'user(emailAddress,displayName)' });
+    const email = String(about?.data?.user?.emailAddress || '').toLowerCase();
+    if (!email) {
+      throw configError(
+        'Google Drive OAuth connected, but Google did not return the Drive account email. Recheck the refresh token and OAuth client configuration.',
+        503,
+        'DRIVE_ACCOUNT_UNKNOWN'
+      );
+    }
+    if (email !== REQUIRED_OAUTH_EMAIL.toLowerCase()) {
+      throw configError(
+        `The Google Drive OAuth token belongs to ${email}, but WyCode Studio only permits the owner account ${REQUIRED_OAUTH_EMAIL}. Generate the refresh token while signed in to the permitted Google account.`,
+        403,
+        'DRIVE_ACCOUNT_MISMATCH'
+      );
+    }
+  } catch (e) {
+    if (e?.publicCode) throw e;
+    throw driveError(e, '', 'Google Drive account');
+  }
 }
 
 function driveError(e, folderId, kind) {
@@ -78,22 +94,22 @@ function driveError(e, folderId, kind) {
   const reason = String(e?.errors?.[0]?.reason || '').toLowerCase();
   const rawMessage = String(e?.errors?.[0]?.message || e?.response?.data?.error?.message || e?.message || 'Unknown Google Drive error');
   if (status === 401 || /unauthenticated|invalid.*credential|invalid_grant|unauthorized/.test(rawMessage.toLowerCase())) {
-    return configError('Google Drive rejected the service-account credentials. Check GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON in Studio Vercel Production and redeploy after correcting it.', 503, 'DRIVE_AUTH_FAILED');
+    return configError('Google Drive rejected the OAuth credentials. Check GOOGLE_DRIVE_OAUTH_CLIENT_ID, GOOGLE_DRIVE_OAUTH_CLIENT_SECRET, and GOOGLE_DRIVE_OAUTH_REFRESH_TOKEN in Studio Vercel Production, then redeploy after correcting them.', 503, 'DRIVE_AUTH_FAILED');
   }
   if (/accessnotconfigured|access not configured|api.*not.*enabled/.test(reason + ' ' + rawMessage.toLowerCase())) {
-    return configError(`The Google Drive API is not enabled for the Google Cloud project used by this service account. Enable Google Drive API for that project, then try again.`, 503, 'DRIVE_API_NOT_ENABLED');
+    return configError(`The Google Drive API is not enabled for the Google Cloud project used by this OAuth client. Enable Google Drive API for that project, then try again.`, 503, 'DRIVE_API_NOT_ENABLED');
   }
   if (/storagequota|storage quota|quota exceeded|dailylimit|daily limit/.test(reason + ' ' + rawMessage.toLowerCase())) {
-    return configError(`Google Drive rejected the upload because the service account or destination has a storage/quota limit. Use a shared Drive with available storage or another supported Drive account, then try again.`, 503, 'DRIVE_QUOTA');
+    return configError(`Google Drive rejected the upload because the connected Google account or destination has a storage/quota limit. Free space in that Google Drive or choose a different supported Drive account, then try again.`, 503, 'DRIVE_QUOTA');
   }
   if (status === 403 || /forbidden|permission|insufficientpermissions/.test(reason + ' ' + rawMessage.toLowerCase())) {
-    return configError(`Google Drive denied access to the ${kind} destination folder (${folderId}). Share that folder with the service-account email as Editor, then try again.`, 503, 'DRIVE_FOLDER_PERMISSION');
+    return configError(`Google Drive denied access to the ${kind} destination folder (${folderId}). Make sure the connected Google account has Editor access to that folder, then try again.`, 503, 'DRIVE_FOLDER_PERMISSION');
   }
   if (status === 404 || /not.?found/.test(rawMessage.toLowerCase())) {
-    return configError(`Google Drive could not find the ${kind} destination folder (${folderId}). Check that the folder ID is correct and that the service account can access it.`, 503, 'DRIVE_FOLDER_NOT_FOUND');
+    return configError(`Google Drive could not find the ${kind} destination folder (${folderId}). Check that the folder ID is correct and that the connected Google account can access it.`, 503, 'DRIVE_FOLDER_NOT_FOUND');
   }
   if (status === 400 && /parent|supportsAllDrives|shared drive|storage quota/.test(rawMessage.toLowerCase())) {
-    return configError(`Google Drive rejected the ${kind} destination folder (${folderId}). Check the folder type, sharing, and service-account access. Google returned: ${rawMessage}`, 503, 'DRIVE_FOLDER_INVALID');
+    return configError(`Google Drive rejected the ${kind} destination folder (${folderId}). Check the folder type, sharing, and connected Google account access. Google returned: ${rawMessage}`, 503, 'DRIVE_FOLDER_INVALID');
   }
   return configError(`Google Drive upload failed for the ${kind} destination folder (${folderId}). Google returned: ${rawMessage}`, 502, 'DRIVE_UPLOAD_FAILED');
 }
@@ -126,6 +142,7 @@ export default async function handler(req, res) {
       : (kind === 'cover' ? NORMAL_COVER_FOLDER_ID : SPECIAL_COVER_FOLDER_ID);
     if (kind === 'source' && !folderId) return json(res, 503, { error: 'Source-file Drive destination is not configured.' });
     const drive = getDrive();
+    await verifyDriveAccount(drive);
     let created;
     try {
       created = await drive.files.create({
@@ -148,7 +165,7 @@ export default async function handler(req, res) {
         });
       } catch (e) {
         const status = Number(e?.code || e?.response?.status || 0);
-        if (status === 403) throw configError(`The ${kind === 'cover' ? 'normal-cover' : 'special-cover'} uploaded successfully, but Google Drive would not allow its public preview permission to be created. Check that the service account can change sharing on folder ${folderId}.`, 503, 'DRIVE_PREVIEW_PERMISSION');
+        if (status === 403) throw configError(`The ${kind === 'cover' ? 'normal-cover' : 'special-cover'} uploaded successfully, but Google Drive would not allow its public preview permission to be created. Check that the connected Google account can change sharing on folder ${folderId}.`, 503, 'DRIVE_PREVIEW_PERMISSION');
         throw configError(`The ${kind === 'cover' ? 'normal-cover' : 'special-cover'} uploaded successfully, but Google Drive preview setup failed: ${String(e?.errors?.[0]?.message || e?.message || 'Unknown permission error')}`, 502, 'DRIVE_PREVIEW_FAILED');
       }
       viewUrl = `https://drive.google.com/uc?export=view&id=${encodeURIComponent(fileId)}`;

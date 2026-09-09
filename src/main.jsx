@@ -3,7 +3,7 @@ import{createRoot}from"react-dom/client";
 import{getAuth,onAuthStateChanged,signInWithPopup,signOut,GoogleAuthProvider}from"firebase/auth";
 import{getFirestore,addDoc,collection,doc,onSnapshot,serverTimestamp,updateDoc}from"firebase/firestore";
 import{initializeApp}from"firebase/app";
-import{LayoutDashboard,Package,ShoppingBag,Users,Settings as SettingsIcon,Plus,Search,LogOut,Pencil,Trash2,X,LockKeyhole,Image as ImageIcon,FileArchive,DollarSign,Tag,Sparkles,Upload}from"lucide-react";
+import{LayoutDashboard,Package,ShoppingBag,Users,Settings as SettingsIcon,Plus,Search,LogOut,Pencil,Trash2,X,LockKeyhole,Cloud,Image as ImageIcon,FileArchive,DollarSign,Tag,Sparkles,Upload}from"lucide-react";
 import"./styles.css";
 
 const firebaseConfig={
@@ -80,7 +80,21 @@ function Card({t,v}){return <div className="card"><small>{t}</small><strong>{v}<
 function Table({p,edit,remove}){return <section className="panel table"><div className="tr head"><span>Product</span><span>Price</span><span>Status</span><span>Drive</span><span/></div>{p.length?p.map(x=><div className="tr" key={x.id}><span><b>{x.name}</b>{x.saleType==="special"&&<span className="pill special">★ Special</span>}<small>{x.slug}</small></span><span>{money(x.price,x.currency)}</span><span className="pill">{x.status}</span><span>{x.driveFileId?"✓":"!"}</span><span><button onClick={()=>edit(x)} aria-label={`Edit ${x.name}`}><Pencil size={15}/></button><button onClick={()=>remove(x.id)} aria-label={`Archive ${x.name}`} title="Archive product"><Trash2 size={15}/></button></span></div>):<p>No products match your search.</p>}</section>}
 function Orders({o}){return <section className="panel table"><h2>Orders</h2>{o.length?o.map(x=><div className="tr" key={x.id}><span>{x.email||"—"}</span><span>{x.productName||"—"}</span><span>{money(x.amount)}</span><span className="pill">{x.status||"pending"}</span><span>{x.reference||"—"}</span></div>):<p>No orders yet.</p>}</section>}
 function Customers({c}){return <section className="panel table"><h2>Customers</h2>{c.length?c.map(x=><div className="tr" key={x.id}><span>{x.email||"—"}</span><span>{x.name||"—"}</span><span>{x.orders||0}</span><span>Customer</span><span/></div>):<p>No customers yet.</p>}</section>}
-function Settings({user}){return <section className="panel"><h2>Studio settings</h2><p>Admin: <b>{user.email}</b></p><div className="security"><LockKeyhole size={20}/><span>Product source files and cover images are stored in Google Drive. Firebase Storage is not used by this Studio.</span></div><details><summary>Privacy</summary><p>This private admin tool processes only information needed to operate the marketplace. Credentials and private source files should remain server-side.</p></details><details><summary>Terms</summary><p>Studio access is restricted to the authorized administrator. Keep credentials private and use the dashboard only to manage your own marketplace data.</p></details><details><summary>About</summary><p>WyCode Studio is the private administration panel for the personal WyCode source-code marketplace.</p></details></section>}
+function Settings({user}){
+ const[drive,setDrive]=useState(null),[checking,setChecking]=useState(false);
+ async function checkDrive(){
+  setChecking(true);setDrive({state:"checking",message:"Checking Google Drive connection…"});
+  try{
+   if(!auth.currentUser)throw new Error("Your session expired. Sign in again.");
+   const token=await auth.currentUser.getIdToken();
+   const res=await fetch("/api/drive-status",{headers:{Authorization:`Bearer ${token}`}});
+   const j=await res.json().catch(()=>({}));
+   if(!res.ok)throw new Error(j.error||"Google Drive connection check failed");
+   setDrive({state:"ok",message:j.message||"Google Drive is connected and ready."});
+  }catch(e){setDrive({state:"error",message:e.message||"Google Drive connection check failed"});}
+  finally{setChecking(false)}
+ }
+ return <section className="panel"><h2>Studio settings</h2><p>Admin: <b>{user.email}</b></p><div className="security"><LockKeyhole size={20}/><span>Product source files and cover images are stored in Google Drive. Firebase Storage is not used by this Studio.</span></div><div className="security"><Cloud size={20}/><span><b>Google Drive OAuth</b><br/><small>WyCode Studio uses your authorized Google Drive account server-side. No service-account storage quota is used here.</small></span><button type="button" className="secondary" onClick={checkDrive} disabled={checking}>{checking?"Checking…":"Test connection"}</button></div>{drive&&<div className={`notice ${drive.state==="ok"?"successNotice":""}`}>{drive.message}</div>}<details><summary>Privacy</summary><p>This private admin tool processes only information needed to operate the marketplace. Credentials and private source files should remain server-side.</p></details><details><summary>Terms</summary><p>Studio access is restricted to the authorized administrator. Keep credentials private and use the dashboard only to manage your own marketplace data.</p></details><details><summary>About</summary><p>WyCode Studio is the private administration panel for the personal WyCode source-code marketplace.</p></details></section>}
 function Picker({label,icon:Icon,accept,onChange,disabled,filename,helper,children}){
  return <div className="pickerField"><div className="pickerLabel"><span>{Icon&&<Icon size={15}/>} {label}</span>{filename&&<small title={filename}>{filename}</small>}</div><label className={`picker${disabled?" disabled":""}`}><input type="file" accept={accept} onChange={onChange} disabled={disabled}/><span className="pickerIcon"><Icon size={18}/></span><span className="pickerCopy"><b>{filename?"Choose another file":"Choose a file"}</b><small>{helper}</small></span><span className="pickerButton">Browse</span></label>{children}</div>
 }
