@@ -34,7 +34,7 @@ Adding a product now has an "Add file" box that uploads the selected file straig
 
 Setup required in your Vercel project (Settings → Environment Variables), see `.env.example`:
 - `GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON` — a Google Cloud service account key (JSON) with Editor access. Share your Drive folder with the service account's `client_email`.
-- `GOOGLE_DRIVE_FOLDER_ID` — destination folder for uploads. Defaults to `1sywZa56KKtJE0HMoKuCzBdloD_7b-1e-` if unset.
+- `GOOGLE_DRIVE_FOLDER_ID` — destination folder for product source ZIP files. Normal covers and special covers use their dedicated fixed Drive folders.
 
 Notes:
 - The upload endpoint verifies the admin's Firebase sign-in token server-side before touching Drive — no extra login step needed in the UI.
@@ -88,3 +88,10 @@ Never expose raw private Google Drive download URLs to buyers.
 
 ## Production upload limits
 Direct source ZIP uploads are limited to 3 MB and cover images to 2 MB to leave headroom for Base64 request overhead. Larger source archives should be uploaded to the configured Google Drive folder and their file ID pasted into the product form.
+
+### Google Drive upload routing
+- Source ZIP (`kind: source`) → `GOOGLE_DRIVE_FOLDER_ID` from Vercel.
+- Normal cover (`kind: cover`) → `1l9mlgRZgiNwhC5H0moM-4AQiGRSqnb_o`.
+- Special cover (`kind: special-cover`) → `1cbtAwTafxCKtaT8SzjW-0XCo66J4hQ5T`.
+
+The frontend pickers send these exact `kind` values to `/api/upload`; the API rejects unknown kinds instead of silently treating them as source uploads.

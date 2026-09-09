@@ -4,7 +4,8 @@ import {Readable} from 'node:stream';
 
 const ADMIN_EMAILS = ['frenemy566@gmail.com'];
 // Fallback only — set GOOGLE_DRIVE_FOLDER_ID in your Vercel project env vars.
-const DEFAULT_FOLDER_ID = '1l9mlgRZgiNwhC5H0moM-4AQiGRSqnb_o';
+const NORMAL_COVER_FOLDER_ID = '1l9mlgRZgiNwhC5H0moM-4AQiGRSqnb_o';
+const SPECIAL_COVER_FOLDER_ID = '1cbtAwTafxCKtaT8SzjW-0XCo66J4hQ5T';
 const MAX_SOURCE_BYTES = 3 * 1024 * 1024; // Base64 encoding adds overhead; keep source uploads comfortably below serverless request limits.
 const MAX_COVER_BYTES = 2 * 1024 * 1024; // Keep cover uploads small enough for reliable direct browser uploads.
 
@@ -55,17 +56,21 @@ export default async function handler(req, res) {
     const b = await readBody(req);
     const filename = String(b.filename || '').trim();
     const mimeType = String(b.mimeType || 'application/octet-stream');
-    const kind = b.kind === 'cover' ? 'cover' : 'source';
+    const kind = String(b.kind || '').trim();
+    if (!['source', 'cover', 'special-cover'].includes(kind)) return json(res, 400, { error: 'Invalid upload kind.' });
     const dataBase64 = String(b.dataBase64 || '');
     if (!filename || !dataBase64) return json(res, 400, { error: 'filename and dataBase64 are required' });
-    if (kind === 'cover' && !/^image\//i.test(mimeType)) return json(res, 400, { error: 'Cover uploads must be image files.' });
+    if ((kind === 'cover' || kind === 'special-cover') && !/^image\//i.test(mimeType)) return json(res, 400, { error: 'Cover uploads must be image files.' });
 
     const buffer = Buffer.from(dataBase64, 'base64');
     if (!buffer.length) return json(res, 400, { error: 'File is empty' });
-    const maxBytes = kind === 'cover' ? MAX_COVER_BYTES : MAX_SOURCE_BYTES;
-    if (buffer.length > maxBytes) return json(res, 413, { error: kind === 'cover' ? 'Cover image is too large for direct upload. Please use an image under 2 MB.' : 'Source archive is too large for direct upload. Please use a ZIP under 3 MB or upload it to Drive manually and paste the file ID instead.' });
+    const maxBytes = (kind === 'cover' || kind === 'special-cover') ? MAX_COVER_BYTES : MAX_SOURCE_BYTES;
+    if (buffer.length > maxBytes) return json(res, 413, { error: (kind === 'cover' || kind === 'special-cover') ? 'Cover image is too large for direct upload. Please use an image under 2 MB.' : 'Source archive is too large for direct upload. Please use a ZIP under 3 MB or upload it to Drive manually and paste the file ID instead.' });
 
-    const folderId = String(process.env.GOOGLE_DRIVE_FOLDER_ID || DEFAULT_FOLDER_ID).trim();
+    const folderId = kind === 'source'
+      ? String(process.env.GOOGLE_DRIVE_FOLDER_ID || '').trim()
+      : (kind === 'cover' ? NORMAL_COVER_FOLDER_ID : SPECIAL_COVER_FOLDER_ID);
+    if (kind === 'source' && !folderId) return json(res, 503, { error: 'Source-file Drive destination is not configured.' });
     const drive = getDrive();
     const created = await drive.files.create({
       requestBody: { name: filename, parents: [folderId] },
@@ -75,7 +80,7 @@ export default async function handler(req, res) {
     });
     const fileId = created.data.id;
     let viewUrl = '';
-    if (kind === 'cover' && fileId) {
+    if ((kind === 'cover' || kind === 'special-cover') && fileId) {
       await drive.permissions.create({
         fileId,
         requestBody: { type: 'anyone', role: 'reader' },
