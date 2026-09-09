@@ -1,4 +1,4 @@
-# WyCode Studio v1.1.9
+# WyCode Studio v1.1.8
 
 Private admin dashboard for the WyCode source-code marketplace.
 
@@ -145,7 +145,3 @@ After saving the Production variables, redeploy the Studio. Sign in with the all
 - **`DRIVE_FOLDER_PERMISSION`**: the connected OAuth account cannot add files to the destination folder.
 
 The refresh token is long-lived but can be revoked by Google or by changing the account's security/consent state. If that happens, generate a replacement refresh token and update the Vercel variable.
-
-
-## Drive status panel
-Studio Settings includes a live Google Drive diagnostics panel showing the connected account, destination folder, storage/quota state, upload readiness, and the exact current reason an upload of the selected diagnostic size would be blocked.

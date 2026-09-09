@@ -93,8 +93,15 @@ function driveError(e, folderId, kind) {
   const status = Number(e?.code || e?.response?.status || 0);
   const reason = String(e?.errors?.[0]?.reason || '').toLowerCase();
   const rawMessage = String(e?.errors?.[0]?.message || e?.response?.data?.error?.message || e?.message || 'Unknown Google Drive error');
-  if (status === 401 || /unauthenticated|invalid.*credential|invalid_grant|unauthorized/.test(rawMessage.toLowerCase())) {
-    return configError('Google Drive rejected the OAuth credentials. Check GOOGLE_DRIVE_OAUTH_CLIENT_ID, GOOGLE_DRIVE_OAUTH_CLIENT_SECRET, and GOOGLE_DRIVE_OAUTH_REFRESH_TOKEN in Studio Vercel Production, then redeploy after correcting them.', 503, 'DRIVE_AUTH_FAILED');
+  const lower = rawMessage.toLowerCase();
+  if (status === 401 || /invalid_grant|invalid client|invalid_client|unauthenticated|invalid.*credential|unauthorized/.test(lower)) {
+    if (/invalid_grant/.test(lower)) {
+      return configError('Google OAuth rejected the refresh token (invalid_grant). The refresh token may be expired, revoked, generated for a different OAuth client, or missing the required Drive authorization. Generate a new refresh token with the same OAuth client ID/secret, make sure it is for the permitted Studio account, update GOOGLE_DRIVE_OAUTH_REFRESH_TOKEN in Vercel Production, and redeploy.', 503, 'DRIVE_REFRESH_TOKEN_INVALID');
+    }
+    if (/invalid_client|invalid client/.test(lower)) {
+      return configError('Google OAuth rejected the client credentials (invalid_client). Verify that GOOGLE_DRIVE_OAUTH_CLIENT_ID and GOOGLE_DRIVE_OAUTH_CLIENT_SECRET are from the same Google Cloud OAuth client, are copied exactly, and are set in Vercel Production. Then redeploy.', 503, 'DRIVE_CLIENT_INVALID');
+    }
+    return configError(`Google Drive authentication failed (${status || 'OAuth'}). Google returned: ${rawMessage}. Verify the server-side OAuth client ID, client secret, and refresh token in Vercel Production.`, 503, 'DRIVE_AUTH_FAILED');
   }
   if (/accessnotconfigured|access not configured|api.*not.*enabled/.test(reason + ' ' + rawMessage.toLowerCase())) {
     return configError(`The Google Drive API is not enabled for the Google Cloud project used by this OAuth client. Enable Google Drive API for that project, then try again.`, 503, 'DRIVE_API_NOT_ENABLED');

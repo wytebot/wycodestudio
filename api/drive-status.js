@@ -14,7 +14,11 @@ function classify(e,folderId=''){
  const reason=String(e?.errors?.[0]?.reason||'').toLowerCase();
  const msg=String(e?.errors?.[0]?.message||e?.response?.data?.error?.message||e?.message||'Unknown Google Drive error');
  const text=(reason+' '+msg).toLowerCase();
- if(status===401||/invalid_grant|invalid.*credential|unauthenticated|unauthorized/.test(text)) return configError('Google Drive OAuth credentials are invalid or the refresh token was revoked. Generate a new refresh token for the permitted Studio account and update Vercel.',503,'DRIVE_AUTH_FAILED');
+ if(status===401||/invalid_grant|invalid_client|invalid client|invalid.*credential|unauthenticated|unauthorized/.test(text)){
+  if(/invalid_grant/.test(text)) return configError('Google OAuth rejected the refresh token (invalid_grant). It may be revoked, expired, generated for a different OAuth client, or missing Drive authorization. Generate a new refresh token with the same OAuth client ID/secret for the permitted Studio account, update Vercel Production, and redeploy.',503,'DRIVE_REFRESH_TOKEN_INVALID');
+  if(/invalid_client|invalid client/.test(text)) return configError('Google OAuth rejected the client credentials (invalid_client). Make sure GOOGLE_DRIVE_OAUTH_CLIENT_ID and GOOGLE_DRIVE_OAUTH_CLIENT_SECRET belong to the same Google Cloud OAuth client and are set exactly in Vercel Production, then redeploy.',503,'DRIVE_CLIENT_INVALID');
+  return configError(`Google Drive authentication failed. Google returned: ${msg}. Verify the server-side OAuth credentials in Vercel Production.`,503,'DRIVE_AUTH_FAILED');
+ }
  if(/accessnotconfigured|access not configured|api.*not.*enabled/.test(text)) return configError('Google Drive API is not enabled for the Google Cloud project used by this OAuth client.',503,'DRIVE_API_NOT_ENABLED');
  if(status===403||/forbidden|permission|insufficientpermissions/.test(text)) return configError(`Google Drive denied access. Confirm the connected account can access the source folder${folderId?` (${folderId})`:''}.`,503,'DRIVE_FOLDER_PERMISSION');
  if(status===404||/not.?found/.test(text)) return configError(`Google Drive could not find the configured source folder (${folderId||'not configured'}). Check GOOGLE_DRIVE_FOLDER_ID.`,503,'DRIVE_FOLDER_NOT_FOUND');
@@ -51,23 +55,9 @@ export default async function handler(req,res){
   const quota=about?.data?.storageQuota||{};
   const limit=Number(quota.limit||0),usage=Number(quota.usage||0),free=limit>0?Math.max(0,limit-usage):null;
   const gb=n=>(n/(1024**3)).toFixed(2);
-  const requestedBytes=Math.max(0,Number(new URL(req.url, 'http://localhost').searchParams.get('bytes')||0));
-  const testBytes=requestedBytes||3*1024*1024;
   let storageMessage='Storage quota information is unavailable.';
-  let readiness={status:'ready',reason:'The destination folder is accessible and no storage failure is currently detected.',testedBytes:testBytes};
-  if(folder?.data?.driveId){
-    storageMessage='Destination is in a Shared Drive; personal My Drive storage quota does not apply to this folder.';
-    readiness={status:'ready',reason:'Shared Drive destination is accessible. Storage is governed by the Shared Drive rather than this user’s My Drive quota.',testedBytes:testBytes};
-  }else if(limit>0){
-    storageMessage=`My Drive storage: ${gb(usage)} GB used of ${gb(limit)} GB (${gb(free)} GB available).`;
-    if(usage+testBytes>limit){
-      readiness={status:'blocked',reason:`This upload would fail because only ${gb(free)} GB is available but the tested upload requires ${gb(testBytes)} GB. Free space in the connected Google Drive first.`,testedBytes:testBytes};
-    }else{
-      readiness={status:'ready',reason:`This upload size fits the currently available Drive storage. ${gb(free)} GB is available.`,testedBytes:testBytes};
-    }
-  }else{
-    readiness={status:'ready',reason:'Drive did not report a My Drive storage limit. The folder is accessible, but Google may still reject an upload if the account or destination reaches a provider-side quota.',testedBytes:testBytes};
-  }
-  return json(res,200,{ok:true,message:`Google Drive is connected as ${about.data.user.displayName||driveEmail}. Source folder “${folder.data.name||'Unnamed folder'}” is accessible and ready for uploads. ${storageMessage}`,account:driveEmail,folder:{id:folder.data.id,name:folder.data.name,mimeType:folder.data.mimeType,sharedDrive:Boolean(folder.data.driveId),canAddChildren:folder.data.capabilities?.canAddChildren!==false},storage:{limit,usage,free,sharedDrive:Boolean(folder.data.driveId)},uploadReadiness:readiness});
+  if(folder?.data?.driveId) storageMessage='Destination is in a Shared Drive; personal My Drive storage quota does not apply to this folder.';
+  else if(limit>0) storageMessage=`My Drive storage: ${gb(usage)} GB used of ${gb(limit)} GB (${gb(free)} GB available).`;
+  return json(res,200,{ok:true,message:`Google Drive is connected as ${about.data.user.displayName||driveEmail}. Source folder “${folder.data.name||'Unnamed folder'}” is accessible and ready for uploads. ${storageMessage}`,account:driveEmail,folder:{id:folder.data.id,name:folder.data.name,mimeType:folder.data.mimeType,sharedDrive:Boolean(folder.data.driveId),canAddChildren:folder.data.capabilities?.canAddChildren!==false},storage:{limit,usage,free,sharedDrive:Boolean(folder.data.driveId)},diagnostics:{oauthClientConfigured:Boolean(clientId&&clientSecret),refreshTokenConfigured:Boolean(refreshToken),accountVerified:driveEmail===REQUIRED_OAUTH_EMAIL.toLowerCase(),folderAccessible:true,uploadPermission:folder.data.capabilities?.canAddChildren!==false}});
  }catch(e){const msg=e?.publicCode?e.message:(e?.errors?.[0]?.message||e.message||'Drive connection check failed');const status=e?.status&&e.status>=400&&e.status<600?e.status:500;return json(res,status,{error:msg,code:e?.publicCode||undefined});}
 }
