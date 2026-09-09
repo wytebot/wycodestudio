@@ -22,11 +22,11 @@ Admin allowlist is also hardcoded to `frenemy566@gmail.com`.
 2. Create/enable Firestore Database.
 3. Add the deployed Vercel domain to Firebase Authentication → Settings → Authorized domains.
 4. Publish `firestore.rules.example` as your production Firestore rules.
-5. Enable Firebase Storage and publish `storage.rules.example` as your production Storage rules (needed for the cover image picker below — public read, admin-only write).
+5. Firebase Storage is **not required** for this Studio. Product files and cover images are uploaded to Google Drive instead.
 
 ## Cover images
 
-The product form's "Cover image" field is a direct picker — no URL typing. Selecting an image uploads it straight to Firebase Storage (client-side, using the admin's existing sign-in) and stores the resulting public download URL as the product's `coverUrl`. Recommended size: **800×400px** (2:1) — matches how covers are cropped on the storefront cards. Requires Firebase Storage to be enabled and `storage.rules.example` published (see above); no new environment variables needed for this one, since it doesn't go through the API — just Firebase directly.
+The product form's "Cover image" field uploads the selected image directly to the configured Google Drive folder. The API makes cover images readable by anyone with the generated image URL and stores that URL in Firestore. No Firebase Storage bucket is used for covers.
 
 ## File uploads (api/upload.js)
 
@@ -38,7 +38,7 @@ Setup required in your Vercel project (Settings → Environment Variables), see 
 
 Notes:
 - The upload endpoint verifies the admin's Firebase sign-in token server-side before touching Drive — no extra login step needed in the UI.
-- Vercel serverless functions cap request bodies around ~4.5MB on the Hobby plan. For larger source zips, upload directly to Drive yourself and paste the file ID into the "Google Drive file ID" field instead — it still works as a manual override.
+- Direct uploads are intentionally capped below Vercel Hobby request-body limits. For larger source zips, upload directly to Drive and paste the file ID into the "Google Drive file ID" field; the manual override remains supported.
 
 ## Deployment
 
@@ -63,7 +63,7 @@ npm run dev
 - Product search
 - Product status/category/version/pricing metadata
 - Direct file upload to Google Drive, with manual Drive file ID override
-- Direct cover image picker (Firebase Storage), no manual URL entry
+- Direct cover image picker (Google Drive), no manual URL entry
 - Normal vs. special sale type, with a special-sale banner image field
 - Orders and customers dashboard views
 - Revenue/paid-order metrics
@@ -84,3 +84,7 @@ Before accepting real purchases, implement the shared server-side backend for:
 
 Never expose raw private Google Drive download URLs to buyers.
 
+
+
+## Production upload limits
+Direct source ZIP uploads are limited to 3 MB and cover images to 2 MB to leave headroom for Base64 request overhead. Larger source archives should be uploaded to the configured Google Drive folder and their file ID pasted into the product form.

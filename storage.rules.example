@@ -1,14 +1,3 @@
-rules_version = '2';
-service firebase.storage {
-  match /b/{bucket}/o {
-    function isAdmin() {
-      return request.auth != null &&
-             request.auth.token.email == "frenemy566@gmail.com";
-    }
-    match /covers/{fileName} {
-      allow read: if true;
-      allow write: if isAdmin() && request.resource.size < 10 * 1024 * 1024
-                   && request.resource.contentType.matches('image/.*');
-    }
-  }
-}
+// Firebase Storage is intentionally unused by WyCode Studio.
+// Product files and cover images are stored in Google Drive via /api/upload.
+// Do not deploy Storage rules for this Studio unless another app in the same Firebase project needs them.
