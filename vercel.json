@@ -1,1 +1,1 @@
-{"rewrites":[{"source":"/(.*)","destination":"/index.html"}]}
+{"rewrites":[{"source":"/((?!api/|icon\\.svg|favicon).*)","destination":"/index.html"}]}
