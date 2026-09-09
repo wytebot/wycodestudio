@@ -1,4 +1,4 @@
-# WyCode Studio v1.1.6
+# WyCode Studio v1.1.7
 
 Private admin dashboard for the WyCode source-code marketplace.
 
