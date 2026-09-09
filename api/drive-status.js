@@ -44,9 +44,30 @@ export default async function handler(req,res){
   if(!driveEmail)throw configError('Google Drive OAuth connected, but Google did not return the account email.',503,'DRIVE_ACCOUNT_UNKNOWN');
   if(driveEmail!==REQUIRED_OAUTH_EMAIL.toLowerCase())throw configError(`The refresh token belongs to ${driveEmail}, but WyCode Studio only permits ${REQUIRED_OAUTH_EMAIL}. Generate the refresh token while signed in to the permitted account.`,403,'DRIVE_ACCOUNT_MISMATCH');
   let folder;
-  try{folder=await drive.files.get({fileId:SOURCE_FOLDER_ID,fields:'id,name,mimeType,trashed,driveId',supportsAllDrives:true});}catch(e){throw classify(e,SOURCE_FOLDER_ID);}
+  try{folder=await drive.files.get({fileId:SOURCE_FOLDER_ID,fields:'id,name,mimeType,trashed,driveId,capabilities(canAddChildren,canEdit,canShare)',supportsAllDrives:true});}catch(e){throw classify(e,SOURCE_FOLDER_ID);}
   if(folder?.data?.trashed)throw configError(`The configured source folder (${SOURCE_FOLDER_ID}) is in the Drive trash. Restore it and try again.`,503,'DRIVE_FOLDER_TRASHED');
   if(folder?.data?.mimeType!=='application/vnd.google-apps.folder')throw configError(`GOOGLE_DRIVE_FOLDER_ID (${SOURCE_FOLDER_ID}) is not a Google Drive folder.`,503,'DRIVE_FOLDER_INVALID');
-  return json(res,200,{ok:true,message:`Google Drive is connected as ${about.data.user.displayName||driveEmail}. Source folder “${folder.data.name||'Unnamed folder'}” is accessible and ready for uploads.`});
+  if(folder?.data?.capabilities?.canAddChildren===false)throw configError(`The connected Google account can see the source folder but cannot add files to it. Give the account upload/edit access to that folder.`,503,'DRIVE_FOLDER_PERMISSION');
+  const quota=about?.data?.storageQuota||{};
+  const limit=Number(quota.limit||0),usage=Number(quota.usage||0),free=limit>0?Math.max(0,limit-usage):null;
+  const gb=n=>(n/(1024**3)).toFixed(2);
+  const requestedBytes=Math.max(0,Number(new URL(req.url, 'http://localhost').searchParams.get('bytes')||0));
+  const testBytes=requestedBytes||3*1024*1024;
+  let storageMessage='Storage quota information is unavailable.';
+  let readiness={status:'ready',reason:'The destination folder is accessible and no storage failure is currently detected.',testedBytes:testBytes};
+  if(folder?.data?.driveId){
+    storageMessage='Destination is in a Shared Drive; personal My Drive storage quota does not apply to this folder.';
+    readiness={status:'ready',reason:'Shared Drive destination is accessible. Storage is governed by the Shared Drive rather than this user’s My Drive quota.',testedBytes:testBytes};
+  }else if(limit>0){
+    storageMessage=`My Drive storage: ${gb(usage)} GB used of ${gb(limit)} GB (${gb(free)} GB available).`;
+    if(usage+testBytes>limit){
+      readiness={status:'blocked',reason:`This upload would fail because only ${gb(free)} GB is available but the tested upload requires ${gb(testBytes)} GB. Free space in the connected Google Drive first.`,testedBytes:testBytes};
+    }else{
+      readiness={status:'ready',reason:`This upload size fits the currently available Drive storage. ${gb(free)} GB is available.`,testedBytes:testBytes};
+    }
+  }else{
+    readiness={status:'ready',reason:'Drive did not report a My Drive storage limit. The folder is accessible, but Google may still reject an upload if the account or destination reaches a provider-side quota.',testedBytes:testBytes};
+  }
+  return json(res,200,{ok:true,message:`Google Drive is connected as ${about.data.user.displayName||driveEmail}. Source folder “${folder.data.name||'Unnamed folder'}” is accessible and ready for uploads. ${storageMessage}`,account:driveEmail,folder:{id:folder.data.id,name:folder.data.name,mimeType:folder.data.mimeType,sharedDrive:Boolean(folder.data.driveId),canAddChildren:folder.data.capabilities?.canAddChildren!==false},storage:{limit,usage,free,sharedDrive:Boolean(folder.data.driveId)},uploadReadiness:readiness});
  }catch(e){const msg=e?.publicCode?e.message:(e?.errors?.[0]?.message||e.message||'Drive connection check failed');const status=e?.status&&e.status>=400&&e.status<600?e.status:500;return json(res,status,{error:msg,code:e?.publicCode||undefined});}
 }

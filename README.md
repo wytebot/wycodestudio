@@ -1,4 +1,4 @@
-# WyCode Studio v1.1.7
+# WyCode Studio v1.1.9
 
 Private admin dashboard for the WyCode source-code marketplace.
 
@@ -45,7 +45,7 @@ Notes:
 
 ## Drive connection test
 
-The Settings page includes a **Test connection** button. It authenticates the current Studio admin session, checks the server-side Google OAuth refresh token, verifies the connected Drive account, and reports configuration/authentication/folder-access problems without exposing OAuth secrets to the browser.
+The Settings page includes a **Test connection** button. It authenticates the current Studio admin session, checks the server-side Google OAuth refresh token, verifies the connected Drive account, and reports configuration/authentication/folder-access/storage-capacity problems without exposing OAuth secrets to the browser. It also checks the connected account's My Drive quota before direct uploads and clearly distinguishes storage exhaustion from rate limiting. Shared Drive destinations are detected so personal My Drive quota is not incorrectly treated as the limit.
 
 ## Deployment
 
@@ -140,6 +140,12 @@ After saving the Production variables, redeploy the Studio. Sign in with the all
 - **`DRIVE_AUTH_FAILED`**: the client credentials or refresh token is invalid/revoked. Generate a new refresh token and redeploy.
 - **`DRIVE_ACCOUNT_MISMATCH`**: the refresh token belongs to a different Google account than the Studio owner.
 - **`DRIVE_FOLDER_PERMISSION`**: the connected Google account cannot edit the destination folder.
-- **`DRIVE_QUOTA`**: the connected Google Drive is out of storage/quota.
+- **`DRIVE_QUOTA`**: the connected Google Drive is out of storage for the requested upload.
+- **`DRIVE_RATE_LIMIT`**: Google Drive temporarily rate-limited the request; wait and retry.
+- **`DRIVE_FOLDER_PERMISSION`**: the connected OAuth account cannot add files to the destination folder.
 
 The refresh token is long-lived but can be revoked by Google or by changing the account's security/consent state. If that happens, generate a replacement refresh token and update the Vercel variable.
+
+
+## Drive status panel
+Studio Settings includes a live Google Drive diagnostics panel showing the connected account, destination folder, storage/quota state, upload readiness, and the exact current reason an upload of the selected diagnostic size would be blocked.

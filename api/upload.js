@@ -99,8 +99,11 @@ function driveError(e, folderId, kind) {
   if (/accessnotconfigured|access not configured|api.*not.*enabled/.test(reason + ' ' + rawMessage.toLowerCase())) {
     return configError(`The Google Drive API is not enabled for the Google Cloud project used by this OAuth client. Enable Google Drive API for that project, then try again.`, 503, 'DRIVE_API_NOT_ENABLED');
   }
-  if (/storagequota|storage quota|quota exceeded|dailylimit|daily limit/.test(reason + ' ' + rawMessage.toLowerCase())) {
-    return configError(`Google Drive rejected the upload because the connected Google account or destination has a storage/quota limit. Free space in that Google Drive or choose a different supported Drive account, then try again.`, 503, 'DRIVE_QUOTA');
+  if (/storagequota|storage quota|quota exceeded|dailylimit|daily limit|user rate limit|ratelimit/.test(reason + ' ' + rawMessage.toLowerCase())) {
+    if (/dailylimit|daily limit|user rate limit|ratelimit/.test(reason + ' ' + rawMessage.toLowerCase())) {
+      return configError('Google Drive temporarily rate-limited this upload. Wait a moment and try again. If it continues, use the manual Drive file-ID option.', 429, 'DRIVE_RATE_LIMIT');
+    }
+    return configError('Google Drive rejected the upload because the connected Google account is out of storage quota. Free space in that Google Drive and try again. This Studio uses your authorized Google account, not a service account, for uploads.', 507, 'DRIVE_QUOTA');
   }
   if (status === 403 || /forbidden|permission|insufficientpermissions/.test(reason + ' ' + rawMessage.toLowerCase())) {
     return configError(`Google Drive denied access to the ${kind} destination folder (${folderId}). Make sure the connected Google account has Editor access to that folder, then try again.`, 503, 'DRIVE_FOLDER_PERMISSION');
@@ -112,6 +115,41 @@ function driveError(e, folderId, kind) {
     return configError(`Google Drive rejected the ${kind} destination folder (${folderId}). Check the folder type, sharing, and connected Google account access. Google returned: ${rawMessage}`, 503, 'DRIVE_FOLDER_INVALID');
   }
   return configError(`Google Drive upload failed for the ${kind} destination folder (${folderId}). Google returned: ${rawMessage}`, 502, 'DRIVE_UPLOAD_FAILED');
+}
+
+async function verifyUploadCapacity(drive, folderId, bytesNeeded) {
+  let folder;
+  try {
+    folder = await drive.files.get({
+      fileId: folderId,
+      fields: 'id,name,mimeType,trashed,driveId,capabilities(canAddChildren,canEdit,canShare)',
+      supportsAllDrives: true
+    });
+  } catch (e) {
+    throw driveError(e, folderId, 'destination');
+  }
+  if (folder?.data?.trashed) throw configError(`The Google Drive destination folder (${folderId}) is in the Drive trash. Restore it and try again.`, 503, 'DRIVE_FOLDER_TRASHED');
+  if (folder?.data?.mimeType !== 'application/vnd.google-apps.folder') throw configError(`The configured Google Drive destination (${folderId}) is not a folder.`, 503, 'DRIVE_FOLDER_INVALID');
+  if (folder?.data?.capabilities?.canAddChildren === false) throw configError(`Google Drive does not allow uploads to the destination folder (${folderId}). Give the connected Google account permission to add files to that folder.`, 503, 'DRIVE_FOLDER_PERMISSION');
+
+  // Shared-drive storage is governed by the shared drive, not the user's My Drive quota.
+  if (folder?.data?.driveId) return {folder: folder.data, quota: null};
+
+  let about;
+  try {
+    about = await drive.about.get({fields: 'user(emailAddress,displayName),storageQuota(limit,usage,usageInDrive,usageInDriveTrash)'});
+  } catch (e) {
+    throw driveError(e, folderId, 'Drive storage');
+  }
+  const q = about?.data?.storageQuota || {};
+  const limit = Number(q.limit || 0);
+  const usage = Number(q.usage || 0);
+  if (limit > 0 && usage + bytesNeeded > limit) {
+    const free = Math.max(0, limit - usage);
+    const gb = n => (n / (1024 ** 3)).toFixed(2);
+    throw configError(`Google Drive is out of available storage for this upload. Free space: ${gb(free)} GB; upload size: ${gb(bytesNeeded)} GB. Free space in the connected Google Drive, or upload the ZIP manually to Drive and paste its file ID.`, 507, 'DRIVE_QUOTA');
+  }
+  return {folder: folder.data, quota: {limit, usage, free: Math.max(0, limit - usage), email: String(about?.data?.user?.emailAddress || '')}};
 }
 
 export default async function handler(req, res) {
@@ -143,6 +181,7 @@ export default async function handler(req, res) {
     if (kind === 'source' && !folderId) return json(res, 503, { error: 'Source-file Drive destination is not configured.' });
     const drive = getDrive();
     await verifyDriveAccount(drive);
+    await verifyUploadCapacity(drive, folderId, buffer.length);
     let created;
     try {
       created = await drive.files.create({
