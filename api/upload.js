@@ -35,7 +35,6 @@ async function readBody(req) {
 
 let driveClient;
 
-const REQUIRED_OAUTH_EMAIL = ADMIN_EMAILS[0];
 
 function configError(message, status = 503, code = 'DRIVE_CONFIG') {
   const e = new Error(message);
@@ -76,13 +75,9 @@ async function verifyDriveAccount(drive) {
         'DRIVE_ACCOUNT_UNKNOWN'
       );
     }
-    if (email !== REQUIRED_OAUTH_EMAIL.toLowerCase()) {
-      throw configError(
-        `The Google Drive OAuth token belongs to ${email}, but WyCode Studio only permits the owner account ${REQUIRED_OAUTH_EMAIL}. Generate the refresh token while signed in to the permitted Google account.`,
-        403,
-        'DRIVE_ACCOUNT_MISMATCH'
-      );
-    }
+    // Deliberately do not restrict the OAuth token to a specific email.
+    // Any Google account may authorize Drive as long as it can access the
+    // configured GOOGLE_DRIVE_FOLDER_ID. Studio admin login remains separate.
   } catch (e) {
     if (e?.publicCode) throw e;
     throw driveError(e, '', 'Google Drive account');
@@ -96,7 +91,7 @@ function driveError(e, folderId, kind) {
   const lower = rawMessage.toLowerCase();
   if (status === 401 || /invalid_grant|invalid client|invalid_client|unauthenticated|invalid.*credential|unauthorized/.test(lower)) {
     if (/invalid_grant/.test(lower)) {
-      return configError('Google OAuth rejected the refresh token (invalid_grant). The refresh token may be expired, revoked, generated for a different OAuth client, or missing the required Drive authorization. Generate a new refresh token with the same OAuth client ID/secret, make sure it is for the permitted Studio account, update GOOGLE_DRIVE_OAUTH_REFRESH_TOKEN in Vercel Production, and redeploy.', 503, 'DRIVE_REFRESH_TOKEN_INVALID');
+      return configError('Google OAuth rejected the refresh token (invalid_grant). The refresh token may be expired, revoked, generated for a different OAuth client, or missing the required Drive authorization. Generate a new refresh token with the same OAuth client ID/secret, update GOOGLE_DRIVE_OAUTH_REFRESH_TOKEN in Vercel Production, and redeploy.', 503, 'DRIVE_REFRESH_TOKEN_INVALID');
     }
     if (/invalid_client|invalid client/.test(lower)) {
       return configError('Google OAuth rejected the client credentials (invalid_client). Verify that GOOGLE_DRIVE_OAUTH_CLIENT_ID and GOOGLE_DRIVE_OAUTH_CLIENT_SECRET are from the same Google Cloud OAuth client, are copied exactly, and are set in Vercel Production. Then redeploy.', 503, 'DRIVE_CLIENT_INVALID');

@@ -2,7 +2,6 @@ import {google} from 'googleapis';
 import admin from 'firebase-admin';
 
 const ADMIN_EMAILS = ['frenemy566@gmail.com'];
-const REQUIRED_OAUTH_EMAIL = ADMIN_EMAILS[0];
 const SOURCE_FOLDER_ID = String(process.env.GOOGLE_DRIVE_FOLDER_ID || '').trim();
 
 if (!admin.apps.length) admin.initializeApp({ projectId: 'wycoder' });
@@ -15,7 +14,7 @@ function classify(e,folderId=''){
  const msg=String(e?.errors?.[0]?.message||e?.response?.data?.error?.message||e?.message||'Unknown Google Drive error');
  const text=(reason+' '+msg).toLowerCase();
  if(status===401||/invalid_grant|invalid_client|invalid client|invalid.*credential|unauthenticated|unauthorized/.test(text)){
-  if(/invalid_grant/.test(text)) return configError('Google OAuth rejected the refresh token (invalid_grant). It may be revoked, expired, generated for a different OAuth client, or missing Drive authorization. Generate a new refresh token with the same OAuth client ID/secret for the permitted Studio account, update Vercel Production, and redeploy.',503,'DRIVE_REFRESH_TOKEN_INVALID');
+  if(/invalid_grant/.test(text)) return configError('Google OAuth rejected the refresh token (invalid_grant). It may be revoked, expired, generated for a different OAuth client, or missing Drive authorization. Generate a new refresh token with the same OAuth client ID/secret for the Google account you want to use, update Vercel Production, and redeploy.',503,'DRIVE_REFRESH_TOKEN_INVALID');
   if(/invalid_client|invalid client/.test(text)) return configError('Google OAuth rejected the client credentials (invalid_client). Make sure GOOGLE_DRIVE_OAUTH_CLIENT_ID and GOOGLE_DRIVE_OAUTH_CLIENT_SECRET belong to the same Google Cloud OAuth client and are set exactly in Vercel Production, then redeploy.',503,'DRIVE_CLIENT_INVALID');
   return configError(`Google Drive authentication failed. Google returned: ${msg}. Verify the server-side OAuth credentials in Vercel Production.`,503,'DRIVE_AUTH_FAILED');
  }
@@ -46,7 +45,8 @@ export default async function handler(req,res){
   try{about=await drive.about.get({fields:'user(emailAddress,displayName,permissionId)'});}catch(e){throw classify(e);}
   const driveEmail=String(about?.data?.user?.emailAddress||'').toLowerCase();
   if(!driveEmail)throw configError('Google Drive OAuth connected, but Google did not return the account email.',503,'DRIVE_ACCOUNT_UNKNOWN');
-  if(driveEmail!==REQUIRED_OAUTH_EMAIL.toLowerCase())throw configError(`The refresh token belongs to ${driveEmail}, but WyCode Studio only permits ${REQUIRED_OAUTH_EMAIL}. Generate the refresh token while signed in to the permitted account.`,403,'DRIVE_ACCOUNT_MISMATCH');
+  // Any Google account may authorize Drive. Access is determined by the OAuth
+  // credentials and the configured destination folder permissions.
   let folder;
   try{folder=await drive.files.get({fileId:SOURCE_FOLDER_ID,fields:'id,name,mimeType,trashed,driveId,capabilities(canAddChildren,canEdit,canShare)',supportsAllDrives:true});}catch(e){throw classify(e,SOURCE_FOLDER_ID);}
   if(folder?.data?.trashed)throw configError(`The configured source folder (${SOURCE_FOLDER_ID}) is in the Drive trash. Restore it and try again.`,503,'DRIVE_FOLDER_TRASHED');
@@ -58,6 +58,6 @@ export default async function handler(req,res){
   let storageMessage='Storage quota information is unavailable.';
   if(folder?.data?.driveId) storageMessage='Destination is in a Shared Drive; personal My Drive storage quota does not apply to this folder.';
   else if(limit>0) storageMessage=`My Drive storage: ${gb(usage)} GB used of ${gb(limit)} GB (${gb(free)} GB available).`;
-  return json(res,200,{ok:true,message:`Google Drive is connected as ${about.data.user.displayName||driveEmail}. Source folder “${folder.data.name||'Unnamed folder'}” is accessible and ready for uploads. ${storageMessage}`,account:driveEmail,folder:{id:folder.data.id,name:folder.data.name,mimeType:folder.data.mimeType,sharedDrive:Boolean(folder.data.driveId),canAddChildren:folder.data.capabilities?.canAddChildren!==false},storage:{limit,usage,free,sharedDrive:Boolean(folder.data.driveId)},diagnostics:{oauthClientConfigured:Boolean(clientId&&clientSecret),refreshTokenConfigured:Boolean(refreshToken),accountVerified:driveEmail===REQUIRED_OAUTH_EMAIL.toLowerCase(),folderAccessible:true,uploadPermission:folder.data.capabilities?.canAddChildren!==false}});
+  return json(res,200,{ok:true,message:`Google Drive is connected as ${about.data.user.displayName||driveEmail}. Source folder “${folder.data.name||'Unnamed folder'}” is accessible and ready for uploads. ${storageMessage}`,account:driveEmail,folder:{id:folder.data.id,name:folder.data.name,mimeType:folder.data.mimeType,sharedDrive:Boolean(folder.data.driveId),canAddChildren:folder.data.capabilities?.canAddChildren!==false},storage:{limit,usage,free,sharedDrive:Boolean(folder.data.driveId)},diagnostics:{oauthClientConfigured:Boolean(clientId&&clientSecret),refreshTokenConfigured:Boolean(refreshToken),accountVerified:true,folderAccessible:true,uploadPermission:folder.data.capabilities?.canAddChildren!==false}});
  }catch(e){const msg=e?.publicCode?e.message:(e?.errors?.[0]?.message||e.message||'Drive connection check failed');const status=e?.status&&e.status>=400&&e.status<600?e.status:500;return json(res,status,{error:msg,code:e?.publicCode||undefined});}
 }

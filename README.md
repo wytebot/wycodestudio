@@ -14,7 +14,7 @@ Configured Firebase project:
 - App ID: `1:610749661041:web:37daf5af5946838914c0d0`
 - Analytics ID: `G-RT3WRQPBL3`
 
-Admin allowlist is also hardcoded to `frenemy566@gmail.com`.
+The Studio admin allowlist remains hardcoded to `frenemy566@gmail.com`; Google Drive OAuth is no longer restricted to that email.
 
 ## Firebase Console setup
 
@@ -35,12 +35,12 @@ Adding a product now has an "Add file" box that uploads the selected file straig
 Setup required in your Vercel project (Settings → Environment Variables), see `.env.example`:
 - `GOOGLE_DRIVE_OAUTH_CLIENT_ID` — OAuth 2.0 client ID from Google Cloud.
 - `GOOGLE_DRIVE_OAUTH_CLIENT_SECRET` — OAuth 2.0 client secret from the same client. Server-side only.
-- `GOOGLE_DRIVE_OAUTH_REFRESH_TOKEN` — long-lived OAuth refresh token for the permitted Studio owner Google account. Server-side only; never expose it as a `VITE_*` variable.
+- `GOOGLE_DRIVE_OAUTH_REFRESH_TOKEN` — OAuth refresh token for any Google account that has access to the configured Drive folder. Server-side only; never expose it as a `VITE_*` variable.
 - `GOOGLE_DRIVE_FOLDER_ID` — destination folder for product source ZIP files. Normal covers and special covers use their dedicated fixed Drive folders.
 
 Notes:
 - The upload endpoint verifies the admin's Firebase sign-in token server-side before touching Drive — no extra login step is needed in the Studio UI.
-- Drive access uses OAuth 2.0 on behalf of the permitted owner Google account, so files are stored in that account's Drive instead of relying on a service-account storage quota. The API also checks the connected Drive account email before uploading.
+- Drive access uses OAuth 2.0 on behalf of the Google account represented by the refresh token, so files are stored in that account's Drive instead of relying on a service-account storage quota. The API checks that Google returns a valid connected Drive account and that the account can access the configured destination folder; it does not restrict the Drive OAuth email.
 - Direct uploads are intentionally capped below Vercel Hobby request-body limits. For larger source zips, upload directly to Drive and paste the file ID into the "Google Drive file ID" field; the manual override remains supported.
 
 ## Drive connection test
@@ -105,19 +105,19 @@ The frontend pickers send these exact `kind` values to `/api/upload`; the API re
 
 ## Google Drive OAuth 2.0 setup (Option B — personal Google Drive)
 
-This build no longer requires a Google service account. It uses a server-side OAuth refresh token belonging to the permitted Studio owner account (`frenemy566@gmail.com`).
+This build no longer requires a Google service account. It uses a server-side OAuth refresh token from any Google account that has access to the configured `GOOGLE_DRIVE_FOLDER_ID`.
 
 ### 1. Create an OAuth client in Google Cloud
 1. Open Google Cloud Console and select the project used for the Drive integration.
 2. Enable **Google Drive API**.
-3. Configure the OAuth consent screen. If the app is **External** and still in Testing, add the permitted owner Google account as a test user.
+3. Configure the OAuth consent screen. If the app is **External** and still in Testing, add each Google account that will use the OAuth flow as a test user, or publish/verify the OAuth app as appropriate for your Google Cloud configuration.
 4. Create an **OAuth client ID**. A Desktop app client is the simplest choice when generating a refresh token manually.
 
 ### 2. Generate a refresh token
 Use a trusted OAuth 2.0 authorization flow/tool with the same OAuth client, requesting the scope:
 `https://www.googleapis.com/auth/drive`
 
-The authorization must be completed while signed in as the permitted owner account. Request offline access so Google returns a refresh token. Keep the refresh token private.
+The authorization may be completed while signed in as any Google account that has access to the destination folder. Request offline access so Google returns a refresh token. Keep the refresh token private.
 
 If using Google's OAuth 2.0 Playground, configure it to use your own OAuth client credentials, authorize the Drive scope, exchange the authorization code for tokens, and copy the returned **refresh token**.
 
@@ -133,12 +133,11 @@ Do **not** prefix these with `VITE_`. Do not put the refresh token or client sec
 The source, normal-cover, and special-cover folders must be accessible by the Google account that owns the refresh token. For a personal Drive folder owned by that account, no service-account sharing is required.
 
 ### 5. Redeploy and test
-After saving the Production variables, redeploy the Studio. Sign in with the allowed Studio admin account, upload a small ZIP, and verify the file appears in the configured Drive folder. The API checks the OAuth-connected Drive email before performing the upload, so accidentally using another Google account produces a clear error instead of silently storing files in the wrong Drive.
+After saving the Production variables, redeploy the Studio. Sign in with the allowed Studio admin account, upload a small ZIP, and verify the file appears in the configured Drive folder. The Drive OAuth email is not restricted; the connected Google account simply needs permission to access and add files to the configured folder.
 
 ### OAuth troubleshooting
 - **`MISSING_GOOGLE_OAUTH`**: one or more of the three OAuth variables is missing in Vercel Production.
 - **`DRIVE_AUTH_FAILED`**: the client credentials or refresh token is invalid/revoked. Generate a new refresh token and redeploy.
-- **`DRIVE_ACCOUNT_MISMATCH`**: the refresh token belongs to a different Google account than the Studio owner.
 - **`DRIVE_FOLDER_PERMISSION`**: the connected Google account cannot edit the destination folder.
 - **`DRIVE_QUOTA`**: the connected Google Drive is out of storage for the requested upload.
 - **`DRIVE_RATE_LIMIT`**: Google Drive temporarily rate-limited the request; wait and retry.
