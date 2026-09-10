@@ -209,9 +209,10 @@ export default async function handler(req, res) {
         if (status === 403) throw configError(`The ${kind === 'cover' ? 'normal-cover' : 'special-cover'} uploaded successfully, but Google Drive would not allow its public preview permission to be created. Check that the connected Google account can change sharing on folder ${folderId}.`, 503, 'DRIVE_PREVIEW_PERMISSION');
         throw configError(`The ${kind === 'cover' ? 'normal-cover' : 'special-cover'} uploaded successfully, but Google Drive preview setup failed: ${String(e?.errors?.[0]?.message || e?.message || 'Unknown permission error')}`, 502, 'DRIVE_PREVIEW_FAILED');
       }
-      viewUrl = `https://drive.google.com/uc?export=view&id=${encodeURIComponent(fileId)}`;
+      viewUrl = `https://drive.google.com/thumbnail?id=${encodeURIComponent(fileId)}&sz=w1200`;
+      const downloadUrl = `https://drive.google.com/uc?export=download&id=${encodeURIComponent(fileId)}`;
     }
-    json(res, 200, { fileId, name: created.data.name, size: created.data.size || buffer.length, kind, viewUrl, downloadUrl: fileId ? `https://drive.google.com/uc?export=download&id=${encodeURIComponent(fileId)}` : '' });
+    json(res, 200, { fileId, name: created.data.name, size: created.data.size || buffer.length, kind, viewUrl, thumbnailUrl: viewUrl, downloadUrl: fileId ? `https://drive.google.com/uc?export=download&id=${encodeURIComponent(fileId)}` : '' });
   } catch (e) {
     const msg = e?.publicCode ? e.message : (e?.errors?.[0]?.message || e.message || 'Upload failed');
     const status = e.code === 'auth/id-token-expired' ? 401 : (e.status && e.status >= 400 && e.status < 600 ? e.status : 500);
