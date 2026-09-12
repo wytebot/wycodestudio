@@ -65,7 +65,15 @@ function App(){
     if(dup){return fail(`Slug "${productSlug}" is already used.`)}
     if(edit)await updateDoc(doc(db,"products",edit.id),d);else await addDoc(collection(db,"products"),{...d,createdAt:serverTimestamp(),sales:0});
     setModal(false);setEdit(null);setMsg("✓ Product saved successfully.");alert("Product saved successfully.");
-   }catch(e){setMsg(errText(e));alert(errText(e))}finally{setLoading(false)}
+   }catch(e){
+    const text=errText(e);
+    const permission=e?.code==='permission-denied' || /missing or insufficient permissions/i.test(String(e?.message||''));
+    const detail=permission
+      ? `Firestore denied this write. Make sure Firestore is using the included firestore.rules and that you are signed in as the configured Studio admin account. ${text}`
+      : text;
+    setMsg(detail);
+    alert(detail);
+   }finally{setLoading(false)}
  }
  async function remove(id){
    if(!confirm("Archive this product? Existing orders will remain intact."))return;

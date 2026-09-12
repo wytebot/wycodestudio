@@ -21,7 +21,7 @@ The Studio admin allowlist remains hardcoded to `frenemy566@gmail.com`; Google D
 1. Enable Authentication → Google.
 2. Create/enable Firestore Database.
 3. Add the deployed Vercel domain to Firebase Authentication → Settings → Authorized domains.
-4. Publish `firestore.rules.example` as your production Firestore rules.
+4. Publish the included `firestore.rules` as your production Firestore rules. The included rules allow only the Studio admin account to manage products and read orders/customers; all other browser Firestore access remains denied. This is important because WyCode Market and WyCode Studio use the same Firebase project.
 5. Firebase Storage is **not required** for this Studio. Product files and cover images are uploaded to Google Drive instead.
 
 ## Cover images
