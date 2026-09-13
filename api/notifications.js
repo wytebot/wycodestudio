@@ -76,7 +76,11 @@ export default async function handler(req,res){
     const db=a.firestore();
     if(req.method==='GET'){
       const snap=await db.collection('notificationSubscribers').where('enabled','==',true).get();
-      return json(res,200,{enabled:true,subscribers:snap.size});
+      const queueSnap=await db.collection('notificationState').doc('publishQueue').get();
+      const queue=Array.isArray(queueSnap.data()?.products)?queueSnap.data().products:[];
+      const pendingSnap=await db.collection('notificationBatches').where('status','in',['pending','failed']).limit(20).get();
+      const batches=pendingSnap.docs.map(d=>({id:d.id,status:d.data()?.status||'pending',products:Array.isArray(d.data()?.products)?d.data().products:[],error:String(d.data()?.error||'')}));
+      return json(res,200,{enabled:true,subscribers:snap.size,pendingPublishes:queue.length,pendingBatches:pendingSnap.size,batches});
     }
     const b=await body(req);
     const action=String(b.action||'').trim();
@@ -86,6 +90,48 @@ export default async function handler(req,res){
       const result=await sendToSubscribers(a,'WyCode Market — test notification','Push notifications are connected and ready.',base+'/','wycode-test');
       return json(res,200,{ok:true,...result});
     }
+    if(action==='retry_batch'){
+      const batchId=String(b.batchId||'').trim();
+      if(!batchId)return json(res,400,{error:'batchId is required.'});
+      const batchRef=db.collection('notificationBatches').doc(batchId);
+      const batchSnap=await batchRef.get();
+      if(!batchSnap.exists)return json(res,404,{error:'Notification batch not found.'});
+      const batch=batchSnap.data()||{};
+      if(batch.status==='sent')return json(res,200,{ok:true,skipped:true,reason:'already_sent'});
+      const items=Array.isArray(batch.products)?batch.products:[];
+      if(items.length!==4)return json(res,409,{error:'Only complete 4-product batches can be retried.'});
+      const base=publicBase();
+      if(!base)return json(res,503,{error:'MARKET_URL is not configured. Add the deployed Market URL before sending notifications.',code:'MISSING_MARKET_URL'});
+      const last=items[items.length-1]?.name||'Last app';
+      const message=`${last} and 3 others have been added, get now before the prices increase.`;
+      try{
+        const result=await sendToSubscribers(a,'4 new products added to WyCode Market',message,`${base}/`,`wycode-publish-batch-${batchId}`);
+        await batchRef.update({status:'sent',sentAt:admin.firestore.FieldValue.serverTimestamp(),result,error:admin.firestore.FieldValue.delete()});
+        for(const item of items)if(item.id)await db.collection('notificationDeliveries').doc(item.id).set({status:'sent',batchId,sentAt:admin.firestore.FieldValue.serverTimestamp()},{merge:true});
+        return json(res,200,{ok:true,...result,message});
+      }catch(e){
+        await batchRef.update({status:'failed',error:String(e?.message||e).slice(0,500),failedAt:admin.firestore.FieldValue.serverTimestamp()}).catch(()=>{});
+        return json(res,503,{error:e?.message||'Retry failed.',code:'BATCH_SEND_FAILED'});
+      }
+    }
+    if(action==='custom'){
+      const title=String(b.title||'').trim();
+      const message=String(b.body||'').trim();
+      const rawUrl=String(b.url||'/').trim()||'/';
+      if(!title)return json(res,400,{error:'Notification title is required.'});
+      if(!message)return json(res,400,{error:'Notification message is required.'});
+      if(title.length>100||message.length>300)return json(res,400,{error:'Title must be 100 characters or fewer and message must be 300 characters or fewer.'});
+      const base=publicBase();
+      if(!base)return json(res,503,{error:'MARKET_URL is not configured. Add the deployed Market URL before sending notifications.',code:'MISSING_MARKET_URL'});
+      let url=rawUrl;
+      try{
+        const parsed=new URL(rawUrl,base);
+        if(parsed.origin!==new URL(base).origin)return json(res,400,{error:'Notification links must point to the configured Market domain.'});
+        url=parsed.href;
+      }catch{return json(res,400,{error:'Notification link is not a valid Market URL.'});}
+      const result=await sendToSubscribers(a,title,message,url,`wycode-custom-${Date.now()}`);
+      return json(res,200,{ok:true,...result});
+    }
     if(action!=='new_product')return json(res,400,{error:'Unsupported notification action.'});
     const productId=String(b.productId||'').trim();
     if(!productId)return json(res,400,{error:'productId is required.'});
@@ -93,29 +139,60 @@ export default async function handler(req,res){
     if(!productSnap.exists)return json(res,404,{error:'Product not found.'});
     const p=productSnap.data()||{};
     if(String(p.status||'')!=='published')return json(res,409,{error:'Only published products can trigger buyer notifications.'});
+
     const deliveryRef=db.collection('notificationDeliveries').doc(productId);
-    const claimed=await db.runTransaction(async tx=>{
-      const snap=await tx.get(deliveryRef);
-      if(snap.exists)return false;
-      tx.create(deliveryRef,{productId,createdAt:admin.firestore.FieldValue.serverTimestamp()});
-      return true;
-    });
-    if(!claimed)return json(res,200,{ok:true,skipped:true,reason:'already_sent'});
-    const base=publicBase();
-    if(!base){
-      await deliveryRef.delete().catch(()=>{});
-      return json(res,503,{error:'MARKET_URL is not configured. Add the deployed Market URL before publishing notifications.',code:'MISSING_MARKET_URL'});
-    }
+    const queueRef=db.collection('notificationState').doc('publishQueue');
+    const batchRef=db.collection('notificationBatches').doc();
     const name=String(p.name||'New product').trim()||'New product';
     const category=String(p.category||'Source code').trim();
+
+    const result=await db.runTransaction(async tx=>{
+      const deliverySnap=await tx.get(deliveryRef);
+      const queueSnap=await tx.get(queueRef);
+      if(deliverySnap.exists)return {duplicate:true};
+      tx.create(deliveryRef,{
+        productId,
+        status:'queued',
+        createdAt:admin.firestore.FieldValue.serverTimestamp()
+      });
+      const current=Array.isArray(queueSnap.data()?.products)?queueSnap.data().products:[];
+      const item={id:productId,name,category};
+      const next=[...current,item].slice(-4);
+      if(next.length>=4){
+        tx.create(batchRef,{
+          products:next,
+          status:'pending',
+          createdAt:admin.firestore.FieldValue.serverTimestamp()
+        });
+        tx.set(queueRef,{products:[],updatedAt:admin.firestore.FieldValue.serverTimestamp()},{merge:true});
+        return {duplicate:false,batchId:batchRef.id,batchProducts:next};
+      }
+      tx.set(queueRef,{products:next,updatedAt:admin.firestore.FieldValue.serverTimestamp()},{merge:true});
+      return {duplicate:false,queued:next.length};
+    });
+
+    if(result.duplicate)return json(res,200,{ok:true,skipped:true,reason:'already_queued_or_sent'});
+    if(!result.batchId){
+      return json(res,200,{ok:true,queued:true,pendingCount:result.queued||0,message:`Publish notification queued. ${result.queued||0} of 4 new publishes collected.`});
+    }
+
+    const base=publicBase();
+    if(!base)return json(res,503,{error:'MARKET_URL is not configured. Add the deployed Market URL before sending notifications.',code:'MISSING_MARKET_URL'});
+    const items=result.batchProducts||[];
+    const last=items[items.length-1]?.name||name;
+    const bodyText=`${last} and ${items.length-1} others have been added, get now before the prices increase.`;
     try{
-      const result=await sendToSubscribers(a,'New product on WyCode Market',`${name} is now available in ${category}. Tap to view it.`,`${base}/?product=${encodeURIComponent(productId)}`,`wycode-product-${productId}`);
-      return json(res,200,{ok:true,productId,...result});
+      const sentResult=await sendToSubscribers(a,'4 new products added to WyCode Market',bodyText,`${base}/` ,`wycode-publish-batch-${result.batchId}`);
+      await db.collection('notificationBatches').doc(result.batchId).update({
+        status:'sent',
+        sentAt:admin.firestore.FieldValue.serverTimestamp(),
+        result:sentResult
+      });
+      for(const item of items)await db.collection('notificationDeliveries').doc(item.id).set({status:'sent',batchId:result.batchId,sentAt:admin.firestore.FieldValue.serverTimestamp()},{merge:true});
+      return json(res,200,{ok:true,batch:true,batchId:result.batchId,...sentResult,message:bodyText});
     }catch(sendError){
-      // Do not permanently consume the idempotency marker when FCM could not
-      // complete the send at all. A later publish retry can then try again.
-      await deliveryRef.delete().catch(()=>{});
-      throw sendError;
+      await db.collection('notificationBatches').doc(result.batchId).update({status:'failed',error:String(sendError?.message||sendError).slice(0,500),failedAt:admin.firestore.FieldValue.serverTimestamp()}).catch(()=>{});
+      return json(res,503,{error:sendError?.message||'The 4-product notification could not be delivered. The batch remains queued for retry.',code:'BATCH_SEND_FAILED',batchId:result.batchId});
     }
   }catch(e){
     const status=Number(e?.status||e?.code||0)>=400&&Number(e?.status||e?.code||0)<600?Number(e.status||e.code):500;

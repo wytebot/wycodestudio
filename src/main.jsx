@@ -3,7 +3,7 @@ import{createRoot}from"react-dom/client";
 import{getAuth,onAuthStateChanged,signInWithPopup,signOut,GoogleAuthProvider}from"firebase/auth";
 import{getFirestore,addDoc,collection,doc,onSnapshot,serverTimestamp,updateDoc}from"firebase/firestore";
 import{initializeApp}from"firebase/app";
-import{LayoutDashboard,Package,ShoppingBag,Users,Settings as SettingsIcon,Plus,Search,LogOut,Pencil,Trash2,X,LockKeyhole,Cloud,Image as ImageIcon,FileArchive,DollarSign,Tag,Sparkles,Upload}from"lucide-react";
+import{LayoutDashboard,Package,ShoppingBag,Users,Settings as SettingsIcon,Plus,Search,LogOut,Pencil,Trash2,X,LockKeyhole,Cloud,Image as ImageIcon,FileArchive,DollarSign,Tag,Sparkles,Upload,Bell,Send}from"lucide-react";
 import"./styles.css";
 
 const firebaseConfig={
@@ -75,7 +75,17 @@ function App(){
         const nr=await fetch("/api/notifications",{method:"POST",headers:{"Content-Type":"application/json",Authorization:`Bearer ${token}`},body:JSON.stringify({action:"new_product",productId:savedId})});
         const nj=await nr.json().catch(()=>({}));
         if(!nr.ok)throw new Error(nj.error||"Notification delivery could not be started.");
-        successMessage=nj.sent>0?`✓ Product published and notification sent to ${nj.sent} subscriber${nj.sent===1?"":"s"}.`:"✓ Product published. No buyers are subscribed to notifications yet.";
+        if(nj.batch){
+          successMessage=nj.sent>0
+            ?`✓ Product published and the 4-product notification was sent to ${nj.sent} subscriber${nj.sent===1?"":"s"}.`
+            :`✓ Product published. The 4-product notification was processed, but no buyers are currently subscribed.`;
+        }else if(nj.queued){
+          successMessage=`✓ Product published. Automatic notification queued (${nj.pendingCount||1}/4 new publishes collected).`;
+        }else if(nj.skipped){
+          successMessage=`✓ Product published. This product was already added to the notification queue.`;
+        }else{
+          successMessage=`✓ Product published. Automatic notification status updated.`;
+        }
         setMsg(successMessage);
       }catch(ne){
         successMessage=`✓ Product published, but buyer notification was not sent: ${ne.message||"notification service unavailable"}`;
@@ -101,7 +111,7 @@ function App(){
  async function logout(){try{await signOut(auth)}catch(e){setMsg(`Sign-out failed: ${errText(e)}`)}}
  if(authLoading)return <div className="center"><div className="login"><div className="logo big">W</div><h1>WyCode Studio</h1><p>Checking secure session…</p></div></div>;if(!user)return <Login onLogin={login} msg={msg}/>;if(!allowed)return <Denied onLogout={logout} email={user.email}/>;
  const revenueByCurrency=orders.filter(x=>x.status==="paid").reduce((m,x)=>{const c=String(x.currency||"USD").toUpperCase();m[c]=(m[c]||0)+Number(x.amount||0);return m},{}),revenue=Object.entries(revenueByCurrency).map(([c,v])=>money(v,c)).join(" · ")||"—",list=products.filter(x=>(x.name||"").toLowerCase().includes(search.toLowerCase())||(x.category||"").toLowerCase().includes(search.toLowerCase()));
- return <div className="app"><aside><div className="brand"><div className="logo">W</div><b>WyCode<br/><small>Studio</small></b></div><nav>{[["dashboard","Dashboard",LayoutDashboard],["products","Products",Package],["orders","Orders",ShoppingBag],["customers","Customers",Users],["settings","Settings",SettingsIcon]].map(([id,t,I])=><button key={id} className={view===id?"active":""} onClick={()=>setView(id)}><I size={18}/>{t}</button>)}</nav><details className="helpMenu"><summary>Help & Legal</summary><a href="mailto:wytetechcompany@gmail.com?subject=WyCode%20Studio%20support">Contact</a><button type="button" onClick={()=>setView("settings")}>Privacy</button><button type="button" onClick={()=>setView("settings")}>Terms</button><button type="button" onClick={()=>setView("settings")}>About</button></details><button className="logout" onClick={logout}><LogOut size={17}/>Sign out</button></aside><main><header><div><small>PRIVATE ADMIN</small><h1>{view[0].toUpperCase()+view.slice(1)}</h1></div><div className="headRight"><button className="contactStudio" onClick={()=>location.href="mailto:wytetechcompany@gmail.com?subject=WyCode%20Studio%20payment%20or%20bug%20support&body=Issue%20type%3A%20%5BPayment%20issue%20%2F%20Bug%20%2F%20Other%5D%0A%0ADescription%3A%20%0A%0ASteps%20to%20reproduce%3A%20%0A%0ADevice%2Fbrowser%3A%20%0A%0APlease%20attach%20screenshots.%20"}>CONTACT ME</button><span>{user.email}</span></div></header>{msg&&<div className="notice">{msg}<button onClick={()=>setMsg("")}><X size={15}/></button></div>}{loading&&<div className="notice">Working…</div>}{view==="dashboard"&&<Dashboard p={products} o={orders} c={customers} r={revenue}/>} {view==="products"&&<><div className="toolbar"><div className="search"><Search size={17}/><input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search products..."/></div><button className="primary" onClick={()=>{setEdit(null);setModal(true)}}><Plus size={17}/>Add product</button></div><Table p={list} edit={x=>{setEdit(x);setModal(true)}} remove={remove}/></>}{view==="orders"&&<Orders o={orders}/>} {view==="customers"&&<Customers c={customers}/>} {view==="settings"&&<Settings user={user}/>}</main>{modal&&<Modal p={edit||blank} close={()=>{setModal(false);setEdit(null)}} save={save}/>}</div>
+ return <div className="app"><aside><div className="brand"><div className="logo">W</div><b>WyCode<br/><small>Studio</small></b></div><nav>{[["dashboard","Dashboard",LayoutDashboard],["products","Products",Package],["orders","Orders",ShoppingBag],["customers","Customers",Users],["notifications","Notifications",Bell],["settings","Settings",SettingsIcon]].map(([id,t,I])=><button key={id} className={view===id?"active":""} onClick={()=>setView(id)}><I size={18}/>{t}</button>)}</nav><details className="helpMenu"><summary>Help & Legal</summary><a href="mailto:wytetechcompany@gmail.com?subject=WyCode%20Studio%20support">Contact</a><button type="button" onClick={()=>setView("settings")}>Privacy</button><button type="button" onClick={()=>setView("settings")}>Terms</button><button type="button" onClick={()=>setView("settings")}>About</button></details><button className="logout" onClick={logout}><LogOut size={17}/>Sign out</button></aside><main><header><div><small>PRIVATE ADMIN</small><h1>{view[0].toUpperCase()+view.slice(1)}</h1></div><div className="headRight"><button className="contactStudio" onClick={()=>location.href="mailto:wytetechcompany@gmail.com?subject=WyCode%20Studio%20payment%20or%20bug%20support&body=Issue%20type%3A%20%5BPayment%20issue%20%2F%20Bug%20%2F%20Other%5D%0A%0ADescription%3A%20%0A%0ASteps%20to%20reproduce%3A%20%0A%0ADevice%2Fbrowser%3A%20%0A%0APlease%20attach%20screenshots.%20"}>CONTACT ME</button><span>{user.email}</span></div></header>{msg&&<div className="notice">{msg}<button onClick={()=>setMsg("")}><X size={15}/></button></div>}{loading&&<div className="notice">Working…</div>}{view==="dashboard"&&<Dashboard p={products} o={orders} c={customers} r={revenue}/>} {view==="products"&&<><div className="toolbar"><div className="search"><Search size={17}/><input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search products..."/></div><button className="primary" onClick={()=>{setEdit(null);setModal(true)}}><Plus size={17}/>Add product</button></div><Table p={list} edit={x=>{setEdit(x);setModal(true)}} remove={remove}/></>}{view==="orders"&&<Orders o={orders}/>} {view==="customers"&&<Customers c={customers}/>} {view==="notifications"&&<Notifications/>} {view==="settings"&&<Settings user={user}/>}</main>{modal&&<Modal p={edit||blank} close={()=>{setModal(false);setEdit(null)}} save={save}/>}</div>
 }
 function pricePair(p){const usd=Number(p.priceUSD),ngn=Number(p.priceNGN);if(Number.isFinite(usd)&&usd>0&&Number.isFinite(ngn)&&ngn>0)return `${money(usd,"USD")} · ${money(ngn,"NGN")}`;return money(p.price,p.currency||"USD")}
 function Dashboard({p,o,c,r}){return <><div className="cards"><Card t="Products" v={p.length}/><Card t="Paid orders" v={o.filter(x=>x.status==="paid").length}/><Card t="Customers" v={c.length}/><Card t="Revenue" v={money(r)}/></div><div className="grid"><section className="panel"><h2>Recent products</h2>{p.length?p.slice(0,6).map(x=><div className="row" key={x.id}><span><b>{x.name}</b><small>{x.category}</small></span><b>{pricePair(x)}</b></div>):<p>No products yet.</p>}</section><section className="panel"><h2>Recent orders</h2>{o.length?o.slice(0,6).map(x=><div className="row" key={x.id}><span><b>{x.productName||"Order"}</b><small>{x.email||"—"}</small></span><b>{x.status}</b></div>):<p>No orders yet.</p>}</section></div></>}
@@ -109,6 +119,77 @@ function Card({t,v}){return <div className="card"><small>{t}</small><strong>{v}<
 function Table({p,edit,remove}){return <section className="panel table"><div className="tr head"><span>Product</span><span>Price</span><span>Sales</span><span>Status</span><span>Drive</span><span/></div>{p.length?p.map(x=><div className="tr" key={x.id}><span><b>{x.name}</b>{x.saleType==="special"&&<span className="pill special">★ Special</span>}<small>{x.slug}</small></span><span>{pricePair(x)}</span><span>{Number(x.sales||0).toLocaleString()}</span><span className="pill">{x.status}</span><span>{x.driveFileId?"✓":"!"}</span><span><button onClick={()=>edit(x)} aria-label={`Edit ${x.name}`}><Pencil size={15}/></button><button onClick={()=>remove(x.id)} aria-label={`Archive ${x.name}`} title="Archive product"><Trash2 size={15}/></button></span></div>):<p>No products match your search.</p>}</section>}
 function Orders({o}){return <section className="panel table"><h2>Orders</h2>{o.length?o.map(x=><div className="tr" key={x.id}><span>{x.email||"—"}</span><span>{x.productName||"—"}</span><span>{money(x.amount)}</span><span className="pill">{x.status||"pending"}</span><span>{x.reference||"—"}</span></div>):<p>No orders yet.</p>}</section>}
 function Customers({c}){return <section className="panel table"><h2>Customers</h2>{c.length?c.map(x=><div className="tr" key={x.id}><span>{x.email||"—"}</span><span>{x.name||"—"}</span><span>{x.orders||0}</span><span>Customer</span><span/></div>):<p>No customers yet.</p>}</section>}
+function Notifications(){
+ const[title,setTitle]=useState("WyCode Market Update");
+ const[body,setBody]=useState("");
+ const[url,setUrl]=useState("/");
+ const[status,setStatus]=useState(null);
+ const[busy,setBusy]=useState(false);
+ async function load(){
+  try{
+   if(!auth.currentUser)throw new Error("Your session expired. Sign in again.");
+   const token=await auth.currentUser.getIdToken();
+   const res=await fetch("/api/notifications",{headers:{Authorization:`Bearer ${token}`}});
+   const j=await res.json().catch(()=>({}));
+   if(!res.ok)throw new Error(j.error||"Could not load notification status.");
+   setStatus(j);
+  }catch(e){setStatus({error:e.message||"Notification status unavailable."})}
+ }
+ useEffect(()=>{load()},[]);
+ async function retryBatch(batchId){
+  setBusy(true);
+  try{
+   if(!auth.currentUser)throw new Error("Your session expired. Sign in again.");
+   const token=await auth.currentUser.getIdToken();
+   const res=await fetch("/api/notifications",{method:"POST",headers:{"Content-Type":"application/json",Authorization:`Bearer ${token}`},body:JSON.stringify({action:"retry_batch",batchId})});
+   const j=await res.json().catch(()=>({}));
+   if(!res.ok)throw new Error(j.error||"Batch retry failed.");
+   alert(j.sent>0?`Automatic batch resent to ${j.sent} subscriber${j.sent===1?"":"s"}.`:"No buyers are currently subscribed.");
+   await load();
+  }catch(e){alert(e.message||"Batch retry failed.")}finally{setBusy(false)}
+ }
+ async function send(){
+  setBusy(true);setStatus(v=>v?{...v}:null);
+  try{
+   if(!auth.currentUser)throw new Error("Your session expired. Sign in again.");
+   const cleanTitle=title.trim(),cleanBody=body.trim(),cleanUrl=url.trim()||"/";
+   if(!cleanTitle)return alert("Enter a notification title.");
+   if(!cleanBody)return alert("Enter a notification message.");
+   if(cleanTitle.length>100)return alert("Title must be 100 characters or fewer.");
+   if(cleanBody.length>300)return alert("Message must be 300 characters or fewer.");
+   const token=await auth.currentUser.getIdToken();
+   const res=await fetch("/api/notifications",{method:"POST",headers:{"Content-Type":"application/json",Authorization:`Bearer ${token}`},body:JSON.stringify({action:"custom",title:cleanTitle,body:cleanBody,url:cleanUrl})});
+   const j=await res.json().catch(()=>({}));
+   if(!res.ok)throw new Error(j.error||"Notification could not be sent.");
+   setStatus(j);
+   alert(j.sent>0?`Notification sent to ${j.sent} subscriber${j.sent===1?"":"s"}.`:"No buyers are currently subscribed.");
+  }catch(e){alert(e.message||"Notification could not be sent.")}finally{setBusy(false)}
+ }
+ return <section className="notificationPage">
+  <div className="panel notificationIntro"><div><small className="eyebrow">BUYER COMMUNICATION</small><h2>Notifications</h2><p>Send a custom push notification whenever you have something important to announce. This is separate from the automatic new-product notification.</p></div><div className="notificationStat"><Bell size={18}/><b>{status?.subscribers??"—"}</b><small>subscribers</small></div></div>
+  <div className="notificationGrid">
+   <section className="panel">
+    <h2>Create notification</h2>
+    <p className="muted">Keep it short and useful. The Market opens the link when the subscriber taps the alert.</p>
+    <div className="notificationForm">
+     <label>Title<input value={title} maxLength={100} onChange={e=>setTitle(e.target.value)} placeholder="e.g. Weekend source-code drop"/></label>
+     <label>Message<textarea value={body} maxLength={300} rows={5} onChange={e=>setBody(e.target.value)} placeholder="Tell subscribers what is worth checking out…"/></label>
+     <label>Market link<input value={url} onChange={e=>setUrl(e.target.value)} placeholder="/"/></label>
+     <small className="fieldHint">{title.length}/100 title · {body.length}/300 message</small>
+     <button className="primary notificationSend" type="button" onClick={send} disabled={busy}><Send size={16}/>{busy?"Sending…":"Send to subscribers"}</button>
+    </div>
+   </section>
+   <section className="panel">
+    <h2>Automatic product alerts</h2>
+    <div className="autoAlert"><span className="autoIcon">4×</span><div><b>Batch instead of spam</b><p>A published product does not immediately notify everyone. Studio collects new publishes until 4 products are available.</p></div></div>
+    <div className="autoAlert"><span className="autoIcon">↗</span><div><b>Subscriber message</b><p>The fourth publish sends: <b>“Last app and 3 others have been added, get now before the prices increase.”</b></p></div></div>
+    <div className="queueBox"><span>Currently collected</span><b>{status?.pendingPublishes??"—"} / 4</b>{status?.pendingBatches>0&&<small>{status.pendingBatches} batch notification awaiting attention.</small>}</div>
+    {status?.batches?.map(batch=><div className="failedBatch" key={batch.id}><div><b>{batch.status==="failed"?"Automatic batch failed":"Automatic batch waiting"}</b><small>{batch.products.map(x=>x.name).join(" · ")}</small>{batch.error&&<small>{batch.error}</small>}</div><button className="secondary" type="button" onClick={()=>retryBatch(batch.id)} disabled={busy}>Retry</button></div>)}
+    <p className="muted">Custom notifications sent from this page are immediate and do not change the 4-publish automatic batch.</p>
+   </section>
+  </div>
+ </section>
+}
 function Settings({user}){
  const[drive,setDrive]=useState(null),[checking,setChecking]=useState(false),[notifications,setNotifications]=useState(null),[notificationBusy,setNotificationBusy]=useState(false),[notificationMsg,setNotificationMsg]=useState("");
  async function loadNotifications(){

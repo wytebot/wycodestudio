@@ -170,3 +170,11 @@ The Studio API removes invalid/expired FCM registration tokens automatically. No
 7. The buyer's service worker displays the Market icon and opens the Market on notification click.
 
 Do not manually edit the generated `public/firebase-messaging-sw.js`; it is regenerated during `npm run build`.
+
+## Buyer notifications
+
+WyCode Studio includes a private **Notifications** page for sending custom FCM push notifications to Market subscribers. Custom notifications are sent immediately and are independent of automatic product alerts.
+
+Automatic product alerts are intentionally batched: each newly published product is queued, and the Market subscribers are notified only when 4 new products have been published. The automatic message uses the fourth (latest) product name followed by "and 3 others have been added, get now before the prices increase." Failed automatic batches remain available in Studio for retry.
+
+The notification API uses the existing server-side Firebase Admin configuration and `MARKET_URL`; no new Firebase client environment variable is required.
