@@ -1,180 +1,147 @@
-# WyCode Studio v1.2.1
+# WyCode Market v1.3.0
 
-Private admin dashboard for the WyCode source-code marketplace.
+Private source-code marketplace designed for Vercel. The public catalog reads products from Firestore (the same collection used by WyCode Studio). Paid source files remain private in Google Drive.
 
-## Firebase configuration
+## Flow
+1. Customer selects an active product and enters checkout details.
+2. Backend creates an order and starts a Flutterwave v4 Orchestrator direct charge.
+3. Card fields are encrypted with AES-256-GCM before they are sent to Flutterwave; WyCode does not persist card details.
+4. Customer follows the Flutterwave authorization/redirect step when one is returned.
+5. Flutterwave webhook is verified against the raw request body and the charge is re-queried before an order is marked paid.
+6. Customer return page also re-queries the charge as a backup.
+7. A short-lived HMAC download token is issued only for a verified paid order.
+8. `/api/download` validates the token, checks the Drive file is inside the configured private folder (including nested subfolders), then streams the file through the server. No raw Drive URL is exposed.
 
-The supplied Firebase Web SDK configuration is hardcoded in `src/main.jsx` as requested. **No Firebase `VITE_*` environment variables are required.**
+## Environment variables
+Set these in Vercel. Never put these secrets in `VITE_*` variables.
 
-Configured Firebase project:
-- Project: `wycoder`
-- Auth domain: `wycoder.firebaseapp.com`
-- Storage bucket: `wycoder.firebasestorage.app`
-- Sender ID: `610749661041`
-- App ID: `1:610749661041:web:37daf5af5946838914c0d0`
-- Analytics ID: `G-RT3WRQPBL3`
+### Flutterwave v4
+- `FLW_CLIENT_ID` — Flutterwave v4 client ID.
+- `FLW_CLIENT_SECRET` — Flutterwave v4 client secret.
+- `FLW_ENCRYPTION_KEY` — Flutterwave card-encryption key. It must decode from base64 to exactly 32 bytes for AES-256-GCM.
+- `FLW_WEBHOOK_SECRET` — webhook secret hash configured in Flutterwave.
+- `FLW_ENVIRONMENT` — `sandbox` while testing, `production` for live.
 
-The Studio admin allowlist remains hardcoded to `frenemy566@gmail.com`; Google Drive OAuth is no longer restricted to that email.
+### App
+- `APP_URL` — deployed Market URL, e.g. `https://market.example.com`.
+- `DOWNLOAD_TOKEN_SECRET` — random 32+ character secret used to sign 15-minute download tokens.
 
-## Firebase Console setup
+### Google Drive
+- `GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON` — entire Google service-account JSON. Share the private source folder with its `client_email`.
+- `GOOGLE_DRIVE_FOLDER_ID` — private Drive folder ID.
 
-1. Enable Authentication → Google.
-2. Create/enable Firestore Database.
-3. Add the deployed Vercel domain to Firebase Authentication → Settings → Authorized domains.
-4. Publish the included `firestore.rules` as your production Firestore rules. The included rules allow only the Studio admin account to manage products and read orders/customers; all other browser Firestore access remains denied. This is important because WyCode Market and WyCode Studio use the same Firebase project.
-5. Firebase Storage is **not required** for this Studio. Product files and cover images are uploaded to Google Drive instead.
+### Firebase Admin / Firestore
+- `FIREBASE_SERVICE_ACCOUNT_JSON` — optional separate Firebase Admin credential. If omitted, the Drive service-account JSON is reused. The selected service account must have Firestore access.
 
-## Cover images
+## Firestore
+WyCode Studio creates documents in `products`. Market expects:
+`name`, `description`, `status` (`active` or `published`), `price`, `currency`, `category`, `version`, `demoUrl`, `coverUrl`, `requirements`, `license`, and `driveFileId`. Optional rating fields are `ratingAverage`, `ratingCount`, and `ratingSum`. Verified buyers can submit a star rating and written review through the Market. Review JSON files are stored in Google Drive; aggregate rating fields remain in Firestore for fast catalog display.
 
-The product form's "Cover image" field uploads the selected image directly to the configured Google Drive folder. The API makes cover images readable by anyone with the generated image URL and stores that URL in Firestore. No Firebase Storage bucket is used for covers.
+Orders are written by the server into `orders`.
 
-## File uploads (api/upload.js)
+## Flutterwave configuration diagnostic
 
-Adding a product now has an "Add file" box that uploads the selected file straight into your shared Google Drive folder and fills in the resulting Drive file ID automatically — no more copying IDs by hand.
+After deployment, open `/api/flutterwave-health?mode=flutterwave` to verify the server is actually receiving the Vercel Production v4 credentials. The same endpoint without the query parameter returns the basic Market health response. The endpoint never returns the Client Secret; it reports only whether each credential is configured, lengths, and non-reversible fingerprints. A successful response means the OAuth client credentials were accepted by Flutterwave.
 
-Setup required in your Vercel project (Settings → Environment Variables), see `.env.example`:
-- `GOOGLE_DRIVE_OAUTH_CLIENT_ID` — OAuth 2.0 client ID from Google Cloud.
-- `GOOGLE_DRIVE_OAUTH_CLIENT_SECRET` — OAuth 2.0 client secret from the same client. Server-side only.
-- `GOOGLE_DRIVE_OAUTH_REFRESH_TOKEN` — OAuth refresh token for any Google account that has access to the configured Drive folder. Server-side only; never expose it as a `VITE_*` variable.
-- `GOOGLE_DRIVE_FOLDER_ID` — destination folder for product source ZIP files. Normal covers and special covers use their dedicated fixed Drive folders.
+If it returns HTTP 401, the failure occurs before Firestore or card processing: Flutterwave rejected the OAuth client credentials. Replace the Production Client ID and Production Client Secret together if they were rotated/revoked.
 
-Notes:
-- The upload endpoint verifies the admin's Firebase sign-in token server-side before touching Drive — no extra login step is needed in the Studio UI.
-- Drive access uses OAuth 2.0 on behalf of the Google account represented by the refresh token, so files are stored in that account's Drive instead of relying on a service-account storage quota. The API checks that Google returns a valid connected Drive account and that the account can access the configured destination folder; it does not restrict the Drive OAuth email.
-- Direct uploads are intentionally capped below Vercel Hobby request-body limits. For larger source zips, upload directly to Drive and paste the file ID into the "Google Drive file ID" field; the manual override remains supported.
+## Flutterwave webhook
+Configure this endpoint in the Flutterwave dashboard:
+`https://YOUR-MARKET-DOMAIN/api/webhook`
 
-## Drive connection test
+Set the same random webhook secret in `FLW_WEBHOOK_SECRET`. The endpoint verifies the exact raw request bytes with HMAC-SHA256 and then re-queries the charge before delivering value. Flutterwave recommends both signature verification and re-querying critical transaction data.
 
-The Settings page includes a **Test connection** button. It authenticates the current Studio admin session, checks the server-side Google OAuth refresh token, verifies the connected Drive account, and reports configuration/authentication/folder-access/storage-capacity problems without exposing OAuth secrets to the browser. It also checks the connected account's My Drive quota before direct uploads and clearly distinguishes storage exhaustion from rate limiting. Shared Drive destinations are detected so personal My Drive quota is not incorrectly treated as the limit.
+## Product ratings
+Ratings use the existing Firestore database rather than Google Drive because ratings are structured records, not files. A rating is accepted only when the submitted order exists, is marked paid, and belongs to the product. One review claim is kept per successful order, so a purchase can have exactly one review. The buyer can edit that same review later without increasing the rating count; a separate successful purchase gets its own review entitlement. No new storage provider or environment variable is required.
 
-## Deployment
+## Google Drive delivery
+The server uses the Drive API to retrieve private blob content with `files.get` + `alt=media`, after checking download capability and the configured folder ancestry.
 
-Vercel settings:
-- Framework: Vite
-- Build command: `npm run build`
-- Output directory: `dist`
-- Environment variables: only needed for file uploads — see above. The frontend itself needs none.
-- Node.js version: 22.x (pinned via `package.json` engines — required by `firebase-admin`)
+## Important payment note
+This build uses Flutterwave v4 OAuth 2.0 and the v4 Orchestrator/direct-charge flow. Flutterwave's current v4 card documentation requires card fields to be encrypted with AES-256 and sent as encrypted fields, so `FLW_ENCRYPTION_KEY` is now required for card checkout.
 
-Local:
-```bash
-npm install
-npm run dev
+Do not log or persist card numbers, CVV, expiry values, or decrypted card payloads. Complete any payment/compliance requirements applicable to your Flutterwave account before going live.
+
+## Security
+- Flutterwave client secret and encryption key stay server-side.
+- Drive credentials stay server-side.
+- Raw Drive URLs are never returned to buyers.
+- Download links are HMAC-signed and expire after 15 minutes.
+- Download endpoint verifies order payment state and Drive folder ancestry.
+- Webhook signature is checked against the raw request body.
+- Webhook and return verification re-query the Flutterwave charge before marking an order paid.
+- Flutterwave idempotency keys use the required alphanumeric format.
+
+## Deploy
+Install dependencies and run `npm run build`, then deploy to Vercel. The `api/*.js` files become Vercel serverless functions.
+
+### Vercel variables to restore
+Add the following as **Server-only** Vercel environment variables for the environments you use (Preview/Production as appropriate):
+
+```text
+FLW_CLIENT_ID
+FLW_CLIENT_SECRET
+FLW_ENCRYPTION_KEY
+FLW_WEBHOOK_SECRET
+FLW_ENVIRONMENT
+APP_URL
+DOWNLOAD_TOKEN_SECRET
+GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON
+GOOGLE_DRIVE_FOLDER_ID
+FIREBASE_SERVICE_ACCOUNT_JSON   # optional if reusing the Drive service account
 ```
 
-## Current functionality
+Never paste the actual secret values into chat or commit them to Git.
 
-- Google admin sign-in
-- Admin allowlist enforcement
-- Product create/edit/delete
-- Product search
-- Product status/category/version/pricing metadata
-- Direct file upload to Google Drive, with manual Drive file ID override
-- Direct cover image picker (Google Drive), no manual URL entry
-- Normal vs. special sale type, with a special-sale banner image field
-- Orders and customers dashboard views
-- Revenue/paid-order metrics
-- Firestore error handling and empty states
 
-## Security boundary
-
-The Studio frontend bundle must never contain Flutterwave secret keys, Google OAuth client secrets, Google Drive refresh tokens, Firebase Admin service-account credentials, or payment-verification secrets. Those live only in server-side Vercel environment variables and `api/upload.js` — the browser only ever sees the admin's own Firebase sign-in token and the resulting Drive file ID.
-
-Before accepting real purchases, implement the shared server-side backend for:
-1. Flutterwave payment verification.
-2. Order creation after verified payment.
-3. Short-lived download tokens.
-4. Private Google Drive file retrieval/streaming.
-5. Download authorization and rate limiting.
-
-(WyCode Market already implements all five of the above.)
-
-Never expose raw private Google Drive download URLs to buyers.
+## Production smoke test
+Verify legal accordions, outside-touch/Escape dismissal, invalid-input alerts, a completed purchase, and that the product sales count and Top Sales ranking update only after payment verification.
 
 
 
-## Production upload limits
-Direct source ZIP uploads are limited to 3 MB and cover images to 2 MB to leave headroom for Base64 request overhead. Larger source archives should be uploaded to the configured Google Drive folder and their file ID pasted into the product form.
 
-### Google Drive upload routing
-- Source ZIP (`kind: source`) → `GOOGLE_DRIVE_FOLDER_ID` from Vercel.
-- Normal cover (`kind: cover`) → `1l9mlgRZgiNwhC5H0moM-4AQiGRSqnb_o`.
-- Special cover (`kind: special-cover`) → `1cbtAwTafxCKtaT8SzjW-0XCo66J4hQ5T`.
 
-The frontend pickers send these exact `kind` values to `/api/upload`; the API rejects unknown kinds instead of silently treating them as source uploads.
 
-## Google Drive OAuth 2.0 setup (Option B — personal Google Drive)
-
-This build no longer requires a Google service account. It uses a server-side OAuth refresh token from any Google account that has access to the configured `GOOGLE_DRIVE_FOLDER_ID`.
-
-### 1. Create an OAuth client in Google Cloud
-1. Open Google Cloud Console and select the project used for the Drive integration.
-2. Enable **Google Drive API**.
-3. Configure the OAuth consent screen. If the app is **External** and still in Testing, add each Google account that will use the OAuth flow as a test user, or publish/verify the OAuth app as appropriate for your Google Cloud configuration.
-4. Create an **OAuth client ID**. A Desktop app client is the simplest choice when generating a refresh token manually.
-
-### 2. Generate a refresh token
-Use a trusted OAuth 2.0 authorization flow/tool with the same OAuth client, requesting the scope:
-`https://www.googleapis.com/auth/drive`
-
-The authorization may be completed while signed in as any Google account that has access to the destination folder. Request offline access so Google returns a refresh token. Keep the refresh token private.
-
-If using Google's OAuth 2.0 Playground, configure it to use your own OAuth client credentials, authorize the Drive scope, exchange the authorization code for tokens, and copy the returned **refresh token**.
-
-### 3. Add these Vercel Production variables
-- `GOOGLE_DRIVE_OAUTH_CLIENT_ID` = OAuth client ID
-- `GOOGLE_DRIVE_OAUTH_CLIENT_SECRET` = OAuth client secret
-- `GOOGLE_DRIVE_OAUTH_REFRESH_TOKEN` = refresh token
-- `GOOGLE_DRIVE_FOLDER_ID` = source ZIP destination folder ID
-
-Do **not** prefix these with `VITE_`. Do not put the refresh token or client secret in `src/main.jsx`.
-
-### 4. Folder permissions
-The source, normal-cover, and special-cover folders must be accessible by the Google account that owns the refresh token. For a personal Drive folder owned by that account, no service-account sharing is required.
-
-### 5. Redeploy and test
-After saving the Production variables, redeploy the Studio. Sign in with the allowed Studio admin account, upload a small ZIP, and verify the file appears in the configured Drive folder. The Drive OAuth email is not restricted; the connected Google account simply needs permission to access and add files to the configured folder.
-
-### OAuth troubleshooting
-- **`MISSING_GOOGLE_OAUTH`**: one or more of the three OAuth variables is missing in Vercel Production.
-- **`DRIVE_AUTH_FAILED`**: the client credentials or refresh token is invalid/revoked. Generate a new refresh token and redeploy.
-- **`DRIVE_FOLDER_PERMISSION`**: the connected Google account cannot edit the destination folder.
-- **`DRIVE_QUOTA`**: the connected Google Drive is out of storage for the requested upload.
-- **`DRIVE_RATE_LIMIT`**: Google Drive temporarily rate-limited the request; wait and retry.
-- **`DRIVE_FOLDER_PERMISSION`**: the connected OAuth account cannot add files to the destination folder.
-
-The refresh token is long-lived but can be revoked by Google or by changing the account's security/consent state. If that happens, generate a replacement refresh token and update the Vercel variable.
+## Buyer reviews
+The Market now has a dedicated Reviews page. Buyers receive an anonymous Firebase identity and submit reviews only for paid orders. After a successful purchase, a durable review entitlement is created server-side so the buyer can review later even after the short-lived download token expires. Each successful order gets exactly one review claim; the buyer can edit that review later, but cannot create a second review for the same order. If the same product is purchased again, that new order receives its own review entitlement. Reviews are stored as individual JSON files in Google Drive under `GOOGLE_DRIVE_REVIEWS_FOLDER_ID`; if that variable is blank, the server creates a `WyCode Reviews` subfolder under `GOOGLE_DRIVE_FOLDER_ID`. The Drive service account therefore needs write access to the configured parent/reviews folder. Enable **Anonymous** sign-in in Firebase Authentication and use the hardcoded Firebase Web App configuration in `src/main.jsx`. The anonymous identity is not displayed publicly; review records retain an anonymous reviewer UID plus the verified order ID for abuse control.
 
 
 ## Buyer push notifications (FCM)
 
-WyCode Market can let buyers opt in to browser push notifications. When a Studio product changes from Draft/Archived to **Published**, Studio automatically sends one FCM notification to all active subscribers. Editing an already-published product does not send a duplicate notification. The notification uses the Market icon and opens the Market when tapped.
+The Market includes opt-in Firebase Cloud Messaging (FCM) Web Push. Buyers can tap **Get notified** to receive a browser notification whenever a new product is published from WyCode Studio.
 
-Studio controls this flow through `/api/notifications`. The Settings page shows the current subscriber count and includes **Send test** so you can verify FCM before publishing a product.
+The Firebase Web App configuration is intentionally hardcoded in `src/main.jsx` and the generated service worker because this Market uses the same single-owner Firebase project as WyCode Studio. **No Firebase client-side environment variables are required.** The config values are public Firebase app identifiers; Firebase recommends protecting Firestore and other data with Security Rules rather than treating the client config as a secret.
 
-Add these Vercel **Production** environment variables:
-- `FIREBASE_SERVICE_ACCOUNT_JSON` — Firebase Admin service-account JSON for the same Firebase project. Server-only; never use `VITE_` and never expose it to the browser.
-- `MARKET_URL` — the deployed WyCode Market URL, for example `https://your-market-domain.vercel.app`.
+The Market also uses that same hardcoded API key for the anonymous Firebase identity used by verified reviews.
 
-The service account needs Firebase Cloud Messaging / Firebase Admin access and Firestore access to the shared project's `notificationSubscribers` and `notificationDeliveries` collections.
+### Client configuration
 
-The Studio API removes invalid/expired FCM registration tokens automatically. Notification delivery failure never rolls back a successfully saved product; Studio reports the exact notification failure in the dashboard instead.
+No `VITE_FIREBASE_*` variables are required. The following public Firebase Web App values are embedded in the source:
 
-### Publish notification flow
-1. Buyer opens Market and chooses **Get notified**.
-2. Market requests browser notification permission and obtains an FCM web registration token using the configured VAPID key.
-3. Market registers that token server-side in Firestore.
-4. Studio publishes a product.
-5. Studio calls its protected notification endpoint with the saved product ID.
-6. The endpoint re-reads the product from Firestore, confirms it is published, prevents duplicate delivery for that product, then sends the notification through FCM.
-7. The buyer's service worker displays the Market icon and opens the Market on notification click.
+- `apiKey`
+- `authDomain`
+- `projectId`
+- `storageBucket`
+- `messagingSenderId`
+- `appId`
+- `measurementId`
 
-Do not manually edit the generated `public/firebase-messaging-sw.js`; it is regenerated during `npm run build`.
+### Web Push / VAPID
 
-## Buyer notifications
+`getToken()` cannot create a browser push subscription without a VAPID public key — this was previously omitted, which is why **Get notified** failed for every buyer (no token was ever generated, so nothing ever reached the `notificationSubscribers` collection and Studio had 0 subscribers to send to). This is now fixed in code; you just need to supply the key:
 
-WyCode Studio includes a private **Notifications** page for sending custom FCM push notifications to Market subscribers. Custom notifications are sent immediately and are independent of automatic product alerts.
+1. Open **Firebase Console → Project Settings → Cloud Messaging → Web Push certificates** for the `wycoder` project.
+2. If no key pair exists yet, click **Generate key pair**. Copy the public key string shown.
+3. The key is public (not a secret). Either:
+   - paste it in place of `FCM_VAPID_KEY`'s placeholder value in `src/main.jsx` (same pattern as the hardcoded `firebaseConfig` above it), or
+   - set it as a Vercel environment variable named `VITE_FIREBASE_VAPID_KEY` (available at build time to Vite) — the code prefers this if present.
+4. Redeploy. Until a real key is set, the app fails fast with a clear "Push notifications are not fully configured yet (missing VAPID key)" message instead of a silent/cryptic Firebase error.
 
-Automatic product alerts are intentionally batched: each newly published product is queued, and the Market subscribers are notified only when 4 new products have been published. The automatic message uses the fourth (latest) product name followed by "and 3 others have been added, get now before the prices increase." Failed automatic batches remain available in Studio for retry.
+### Server-side environment variables
 
-The notification API uses the existing server-side Firebase Admin configuration and `MARKET_URL`; no new Firebase client environment variable is required.
+Only server-side credentials remain environment-based:
+
+- `FIREBASE_SERVICE_ACCOUNT_JSON` — private Firebase Admin service-account JSON used by the notification API.
+
+These must never be exposed through `VITE_*` variables. FCM server credentials and registration tokens need secure server-side handling.
+

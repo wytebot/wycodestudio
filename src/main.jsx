@@ -1,11 +1,8 @@
-import React,{useEffect,useState}from"react";
-import{createRoot}from"react-dom/client";
-import{getAuth,onAuthStateChanged,signInWithPopup,signOut,GoogleAuthProvider}from"firebase/auth";
-import{getFirestore,addDoc,collection,doc,onSnapshot,serverTimestamp,updateDoc}from"firebase/firestore";
-import{initializeApp}from"firebase/app";
-import{LayoutDashboard,Package,ShoppingBag,Users,Settings as SettingsIcon,Plus,Search,LogOut,Pencil,Trash2,X,LockKeyhole,Cloud,Image as ImageIcon,FileArchive,DollarSign,Tag,Sparkles,Upload,Bell,Send}from"lucide-react";
-import"./styles.css";
-
+import React,{useEffect,useMemo,useRef,useState}from'react';
+import{createRoot}from'react-dom/client';
+import{initializeApp}from'firebase/app';
+import{getMessaging,getToken,isSupported,onMessage,deleteToken}from'firebase/messaging';
+import'./styles.css';
 const firebaseConfig={
  apiKey:"AIzaSyC9_g7DblKRamrFdM2xBKK03Q-MUJM6tt4",
  authDomain:"wycoder.firebaseapp.com",
@@ -15,291 +12,249 @@ const firebaseConfig={
  appId:"1:610749661041:web:37daf5af5946838914c0d0",
  measurementId:"G-RT3WRQPBL3"
 };
-const app=initializeApp(firebaseConfig);
-const auth=getAuth(app);
-const db=getFirestore(app);
-const ADMIN_EMAILS=["frenemy566@gmail.com"];
-const provider=new GoogleAuthProvider();
-provider.setCustomParameters({prompt:"select_account"});
-const blank={name:"",slug:"",description:"",category:"Developer Tools",price:9.99,priceUSD:9.99,priceNGN:0,currency:"USD",status:"draft",version:"1.0.0",demoUrl:"",driveFileId:"",coverUrl:"",features:"",requirements:"",license:"Single-project commercial license",saleType:"normal",bannerUrl:""};
-const money=(x,c="USD")=>{try{return new Intl.NumberFormat("en-US",{style:"currency",currency:c}).format(Number(x)||0)}catch{return `${c} ${Number(x)||0}`}};
-const makeSlug=x=>String(x||"").toLowerCase().trim().replace(/[^a-z0-9]+/g,"-").replace(/^-|-$/g,"");
-const validUrl=x=>!x||/^https?:\/\/[^\s]+$/i.test(x);
-const timestampValue=x=>x?.toMillis?x.toMillis():x?.seconds?x.seconds*1000:Number(x)||0;
-const errText=e=>e?.code?`${e.code}: ${e.message||"Operation failed"}`:(e?.message||"Operation failed");
-const MAX_SOURCE_BYTES=3*1024*1024;
-const MAX_COVER_BYTES=2*1024*1024;
+const fcmApp=initializeApp(firebaseConfig);
+// Web Push (VAPID) public key from Firebase Console → Project Settings → Cloud
+// Messaging → Web Push certificates. Firebase's getToken() call cannot create
+// a browser push subscription without this key — omitting it is the reason
+// "Get notified" was failing/erroring for every buyer, since no token was
+// ever generated and nothing ever reached the notificationSubscribers
+// collection. This value is public (not a secret) and safe to ship in the
+// client bundle, matching how the rest of firebaseConfig is handled above.
+// Optionally override at build time with VITE_FIREBASE_VAPID_KEY.
+const FCM_VAPID_KEY=(typeof import.meta!=='undefined'&&import.meta.env&&import.meta.env.VITE_FIREBASE_VAPID_KEY)||"REPLACE_WITH_FIREBASE_WEB_PUSH_VAPID_KEY";
 
-function App(){
- const[user,setUser]=useState(null),[authLoading,setAuthLoading]=useState(true),[products,setProducts]=useState([]),[orders,setOrders]=useState([]),[customers,setCustomers]=useState([]),[view,setView]=useState("dashboard"),[edit,setEdit]=useState(null),[modal,setModal]=useState(false),[search,setSearch]=useState(""),[msg,setMsg]=useState(""),[loading,setLoading]=useState(false);
- const allowed=!!user&&ADMIN_EMAILS.includes((user.email||"").toLowerCase());
- useEffect(()=>{const unsub=onAuthStateChanged(auth,u=>{setUser(u);setAuthLoading(false)});const close=e=>document.querySelectorAll("details[open]").forEach(d=>{if(!d.contains(e.target))d.removeAttribute("open")});document.addEventListener("pointerdown",close);return()=>{unsub();document.removeEventListener("pointerdown",close)}},[]);
- useEffect(()=>{if(!allowed||!db){setProducts([]);setOrders([]);setCustomers([]);return}
-   let active=true;
-   const handleError=e=>{if(active)setMsg(`Firestore error: ${errText(e)}`)};
-   const unsubs=[
-    onSnapshot(collection(db,"products"),s=>active&&setProducts(s.docs.map(d=>({id:d.id,...d.data()})).sort((a,b)=>timestampValue(b.createdAt)-timestampValue(a.createdAt))),handleError),
-    onSnapshot(collection(db,"orders"),s=>active&&setOrders(s.docs.map(d=>({id:d.id,...d.data()})).sort((a,b)=>timestampValue(b.createdAt)-timestampValue(a.createdAt))),handleError),
-    onSnapshot(collection(db,"customers"),s=>active&&setCustomers(s.docs.map(d=>({id:d.id,...d.data()}))),handleError)
-   ];
-   return()=>{active=false;unsubs.forEach(u=>u())};
- },[allowed]);
- async function save(e){
-   e.preventDefault();
-   const fail=t=>{setMsg(t);alert(t)};
-   const f=new FormData(e.currentTarget), name=String(f.get("name")||"").trim(), rawSlug=String(f.get("slug")||"").trim(), productSlug=makeSlug(rawSlug||name), legacyPrice=Number(f.get("price")), priceUSD=Number(f.get("priceUSD")), priceNGN=Number(f.get("priceNGN"));
-   const hasUSD=Number.isFinite(priceUSD)&&priceUSD>=0.01, hasNGN=Number.isFinite(priceNGN)&&priceNGN>=0.01;
-   if(!hasUSD&&!hasNGN){return fail("Add at least one valid USD or NGN price.")}
-   const price=hasNGN?priceNGN:(hasUSD?priceUSD:legacyPrice), currency=hasNGN?"NGN":"USD";
-   if(!name||!String(f.get("description")||"").trim()||!Number.isFinite(price)||price<0.01||!String(f.get("version")||"").trim()){return fail("Name, description, a valid price, and version are required.")}
-   const demoUrl=String(f.get("demoUrl")||"").trim(),coverUrl=String(f.get("coverUrl")||"").trim(),bannerUrl=String(f.get("bannerUrl")||"").trim();
-   if(!validUrl(demoUrl)||!validUrl(coverUrl)||!validUrl(bannerUrl)){return fail("Demo URL, cover URL, and banner image URL must be valid http/https URLs.")}
-   const saleType=f.get("saleType")==="special"?"special":"normal";
-   const driveFileId=String(f.get("driveFileId")||"").trim();
-   if(f.get("status")==="published"&&!driveFileId){return fail("Upload a product file (or paste a Google Drive file ID) before publishing.")}
-   if(saleType==="special"&&f.get("status")==="published"&&!bannerUrl){return fail("A banner image URL is required to publish a special sale product.")}
-   const d={name,slug:productSlug,description:String(f.get("description")||"").trim(),category:f.get("category"),price,currency,priceUSD:hasUSD?priceUSD:null,priceNGN:hasNGN?priceNGN:null,status:f.get("status"),version:String(f.get("version")||"").trim(),demoUrl,driveFileId,coverUrl,features:String(f.get("features")||"").trim(),requirements:String(f.get("requirements")||"").trim(),license:String(f.get("license")||"").trim(),saleType,bannerUrl,updatedAt:serverTimestamp()};
-   setLoading(true);
+function money(v,c='USD'){try{return new Intl.NumberFormat('en-NG',{style:'currency',currency:c,maximumFractionDigits:2}).format(Number(v)||0)}catch{return `${c} ${Number(v)||0}`}}
+async function api(url,opt){const r=await fetch(url,opt);const j=await r.json().catch(()=>({}));if(!r.ok){const d=j?.details||{};const v=Array.isArray(d.validation_errors)?d.validation_errors:[];const extra=v.map(x=>x?.field_name&&x?.message?`${x.field_name}: ${x.message}`:'').filter(Boolean).join(' • ');const diag=d?.environment_hint||'';const where=d?.phase?` [${d.phase}${d.environment?` / ${d.environment}`:''}]`:'';const code=d?.code?` (${d.code})`:'';const trace=d?.trace_id?` Trace: ${d.trace_id}`:'';throw new Error(`${j.error||'Request failed'}${code}${where}${extra?` — ${extra}`:''}${diag?` — ${diag}`:''}${trace}`);}return j}
+const CATEGORIES=['All','New Upload','Developer Tools','Productivity','Business','Creative','Utilities','Other','AI','Games','Education','Finance'];
+const emptyForm={name:'',email:'',cardNumber:'',cvv:'',month:'',year:''};
+const emptyAuth={pin:'',otp:'',country:'',city:'',state:'',postal_code:'',line1:'',line2:''};
+const contactBody=`Hello WyCode,\n\nIssue type: [Payment issue / Bug / Other]\nProduct: \nOrder ID (if applicable): \n\nWhat happened:\n\nSteps to reproduce:\n1. \n2. \n3. \n\nExpected result:\n\nActual result:\n\nDevice/browser:\n\nPlease attach screenshots or error messages if available.\n\nThank you.`;
+function contactMail(){location.href='mailto:wytetechcompany@gmail.com?subject='+encodeURIComponent('WyCode Market support — payment issue / bug')+'&body='+encodeURIComponent(contactBody)}
+function luhn(v){let sum=0,dbl=false;for(let i=v.length-1;i>=0;i--){let n=Number(v[i]);if(dbl){n*=2;if(n>9)n-=9}sum+=n;dbl=!dbl}return sum%10===0}
+function splitDetails(v){return String(v||'').split(/\r?\n|•|\s*;\s*/).map(x=>x.trim()).filter(Boolean)}
+function normalizeAuthKind(na){const type=String(na?.type||'').toLowerCase();const nested=String(na?.authorization?.type||'').toLowerCase();if(type==='authorize'&&nested)return nested;if(['requires_pin','pin'].includes(type))return 'pin';if(['requires_otp','otp'].includes(type))return 'otp';if(['requires_additional_fields','avs'].includes(type))return 'avs';if(['pin','otp','avs'].includes(nested))return nested;return ''}
+function hasSavedAnonymousAuth(){try{const x=JSON.parse(localStorage.getItem('wycode-anonymous-auth')||'null');return !!(x?.idToken&&Number(x.expiresAt||0)>Date.now()+60000)}catch{return false}}
+function timeAgo(iso){if(!iso)return '';const then=new Date(iso).getTime();if(!Number.isFinite(then))return '';const diff=Math.max(0,Date.now()-then),m=Math.floor(diff/60000),h=Math.floor(diff/3600000),d=Math.floor(diff/86400000);if(d>30)return new Date(iso).toLocaleDateString();if(d>=1)return `${d} day${d===1?'':'s'} ago`;if(h>=1)return `${h} hour${h===1?'':'s'} ago`;if(m>=1)return `${m} minute${m===1?'':'s'} ago`;return 'Just now'}
+const AVATAR_PALETTE=['#f5b301','#4f8fff','#ff6b6b','#38c793','#a970ff','#ff9f43'];
+function avatarColor(id){let h=0;const s=String(id||'');for(let i=0;i<s.length;i++)h=(h*31+s.charCodeAt(i))>>>0;return AVATAR_PALETTE[h%AVATAR_PALETTE.length]}
+function App(){const[products,setProducts]=useState([]),[category,setCategory]=useState('All'),[selected,setSelected]=useState(null),[busy,setBusy]=useState(false),[msg,setMsg]=useState(''),[catalogError,setCatalogError]=useState(''),[q,setQ]=useState(''),[form,setForm]=useState(emptyForm),[loading,setLoading]=useState(true),[retrying,setRetrying]=useState(false),[menu,setMenu]=useState(false),menuRef=useRef(null),[selectedCurrency,setSelectedCurrency]=useState(''),[owned,setOwned]=useState(()=>{try{const raw=JSON.parse(localStorage.getItem('wycode-market-owned')||'{}');const now=Date.now();for(const k of Object.keys(raw)){if(!raw[k]?.orderId)delete raw[k];else if(Number(raw[k]?.expiresAt||0)<=now)raw[k]={...raw[k],token:'',expiresAt:0}}return raw}catch{return {}}}),[detailsProduct,setDetailsProduct]=useState(null),[authStep,setAuthStep]=useState(null),[authForm,setAuthForm]=useState(emptyAuth),[authBusy,setAuthBusy]=useState(false),[authMsg,setAuthMsg]=useState(''),[ratingBusy,setRatingBusy]=useState(false),[ratingMsg,setRatingMsg]=useState(''),[ratingDraft,setRatingDraft]=useState(0),[reviewPage,setReviewPage]=useState(null),[reviews,setReviews]=useState([]),[reviewLoading,setReviewLoading]=useState(false),[reviewComment,setReviewComment]=useState(''),[reviewMsg,setReviewMsg]=useState(''),[reviewRating,setReviewRating]=useState(0),[reviewBusy,setReviewBusy]=useState(false),[reviewAuth,setReviewAuth]=useState(false),[reviewAuthBusy,setReviewAuthBusy]=useState(false),[reviewEditing,setReviewEditing]=useState(false),[reviewOwn,setReviewOwn]=useState(null),[reviewOrderId,setReviewOrderId]=useState(''),[reviewEligibleOrders,setReviewEligibleOrders]=useState([]);const[pushStatus,setPushStatus]=useState(()=>{try{return localStorage.getItem('wycode-push-subscribed')==='1'?'subscribed':'idle'}catch{return'idle'}}),[pushMsg,setPushMsg]=useState(''),[showPushPrompt,setShowPushPrompt]=useState(false);
+ async function loadProducts(){setCatalogError('');setRetrying(true);try{const x=await api('/api/products');setProducts(Array.isArray(x.products)?x.products:[])}catch(e){setCatalogError(e.message||'We could not load products.')}finally{setLoading(false);setRetrying(false)}}
+
+ useEffect(()=>{
+  let timer;
+  try{
+   const now=new Date();
+   const today=`${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')}`;
+   const shown=localStorage.getItem('wycode-push-prompt-date');
+   const alreadySubscribed=localStorage.getItem('wycode-push-subscribed')==='1';
+   const denied=typeof Notification!=='undefined'&&Notification.permission==='denied';
+   if(!alreadySubscribed&&!denied&&shown!==today){
+    timer=setTimeout(()=>{setShowPushPrompt(true);try{localStorage.setItem('wycode-push-prompt-date',today)}catch{}},350);
+   }
+  }catch{}
+  return()=>{if(timer)clearTimeout(timer)};
+ },[]);
+
+ useEffect(()=>{
+  if(!showPushPrompt)return;
+  const timer=setTimeout(()=>setShowPushPrompt(false),10000);
+  return()=>clearTimeout(timer);
+ },[showPushPrompt]);
+
+ function dismissPushPrompt(){setShowPushPrompt(false)}
+
+ async function subscribeToPush(){
+  setPushStatus('working');setPushMsg('');
+  try{
+   if(!('Notification' in window)||!('serviceWorker' in navigator)||!('PushManager' in window))throw new Error('This browser does not support web push notifications.');
+   if(!firebaseConfig.apiKey||!firebaseConfig.projectId||!firebaseConfig.messagingSenderId)throw new Error('Firebase web messaging configuration is incomplete.');
+   if(!FCM_VAPID_KEY||FCM_VAPID_KEY==='REPLACE_WITH_FIREBASE_WEB_PUSH_VAPID_KEY')throw new Error('Push notifications are not fully configured yet (missing VAPID key). Generate one under Firebase Console → Project Settings → Cloud Messaging → Web Push certificates.');
+   if(Notification.permission==='denied')throw new Error('Notifications are blocked for this site. Allow notifications in your browser/site settings, then try again.');
+   const permission=Notification.permission==='granted'?'granted':await Notification.requestPermission();
+   if(permission!=='granted')throw new Error('Notification permission was not granted.');
+   const supported=await isSupported().catch(()=>false);
+   if(!supported)throw new Error('This browser does not support Firebase web push notifications.');
+   const registration=await navigator.serviceWorker.register('/firebase-messaging-sw.js');
+   const messaging=getMessaging(fcmApp);
+   const token=await getToken(messaging,{vapidKey:FCM_VAPID_KEY,serviceWorkerRegistration:registration});
+   if(!token)throw new Error('Firebase did not return a notification registration token.');
+   const authProfile=await getAnonymousAuth();
+   await api('/api/notifications',{method:'POST',headers:{'Content-Type':'application/json',Authorization:`Bearer ${authProfile.idToken}`},body:JSON.stringify({token})});
+   try{localStorage.setItem('wycode-push-subscribed','1')}catch{}
+   setPushStatus('subscribed');setPushMsg('You will now be notified when new products are published.');
+  }catch(e){
+   setPushStatus('error');setPushMsg(e.message||'Could not enable notifications.');
+  }
+ }
+ async function unsubscribeFromPush(){
+  setPushStatus('working');setPushMsg('');
+  try{
+   const supported=await isSupported().catch(()=>false);
+   if(supported){
+    const messaging=getMessaging(fcmApp);
+    const token=await getToken(messaging,FCM_VAPID_KEY&&FCM_VAPID_KEY!=='REPLACE_WITH_FIREBASE_WEB_PUSH_VAPID_KEY'?{vapidKey:FCM_VAPID_KEY}:undefined).catch(()=>null);
+    const authProfile=await getAnonymousAuth();
+    if(token)await api('/api/notifications',{method:'DELETE',headers:{'Content-Type':'application/json',Authorization:`Bearer ${authProfile.idToken}`},body:JSON.stringify({token})});
+    await deleteToken(messaging).catch(()=>{});
+   }
+   try{localStorage.removeItem('wycode-push-subscribed')}catch{}
+   setPushStatus('idle');setPushMsg('Push notifications turned off.');
+  }catch(e){setPushStatus('error');setPushMsg(e.message||'Could not disable notifications.')}
+ }
+ useEffect(()=>{
+  let off=()=>{};
+  (async()=>{
    try{
-    const dup=products.some(x=>x.id!==edit?.id&&String(x.slug||"").toLowerCase()===productSlug.toLowerCase());
-    if(dup){return fail(`Slug "${productSlug}" is already used.`)}
-    let savedId=edit?.id||"";
-    if(edit)await updateDoc(doc(db,"products",edit.id),d);
-    else {const created=await addDoc(collection(db,"products"),{...d,createdAt:serverTimestamp(),sales:0});savedId=created.id;}
-    const becamePublished=d.status==="published"&&(!edit||String(edit.status||"")!=="published");
-    let successMessage="✓ Product saved successfully.";
-    if(becamePublished&&savedId){
-      try{
-        if(!auth.currentUser)throw new Error("Your Studio session expired. Sign in again.");
-        const token=await auth.currentUser.getIdToken();
-        const nr=await fetch("/api/notifications",{method:"POST",headers:{"Content-Type":"application/json",Authorization:`Bearer ${token}`},body:JSON.stringify({action:"new_product",productId:savedId})});
-        const nj=await nr.json().catch(()=>({}));
-        if(!nr.ok)throw new Error(nj.error||"Notification delivery could not be started.");
-        if(nj.batch){
-          successMessage=nj.sent>0
-            ?`✓ Product published and the 4-product notification was sent to ${nj.sent} subscriber${nj.sent===1?"":"s"}.`
-            :`✓ Product published. The 4-product notification was processed, but no buyers are currently subscribed.`;
-        }else if(nj.queued){
-          successMessage=`✓ Product published. Automatic notification queued (${nj.pendingCount||1}/4 new publishes collected).`;
-        }else if(nj.skipped){
-          successMessage=`✓ Product published. This product was already added to the notification queue.`;
-        }else{
-          successMessage=`✓ Product published. Automatic notification status updated.`;
-        }
-        setMsg(successMessage);
-      }catch(ne){
-        successMessage=`✓ Product published, but buyer notification was not sent: ${ne.message||"notification service unavailable"}`;
-        setMsg(successMessage);
+    if(!('serviceWorker' in navigator)||!(await isSupported()))return;
+    const messaging=getMessaging(fcmApp);
+    off=onMessage(messaging,payload=>{
+     const data=payload?.data||{},title=String(data.title||payload?.notification?.title||'New on WyCode Market'),body=String(data.body||payload?.notification?.body||'A new product is available.');
+     if(Notification.permission==='granted'){
+      try{const note=new Notification(title,{body,icon:'/icon.png',badge:'/icon.png',tag:String(data.tag||'wycode-new-product')});note.onclick=()=>{try{window.focus();const target=String(data.url||'/');const u=new URL(target,window.location.origin);if(u.origin===window.location.origin)window.location.href=u.href;}catch{}}}catch{setPushMsg(`${title}: ${body}`)}
+     }else setPushMsg(`${title}: ${body}`);
+    });
+   }catch{}
+  })();
+  return()=>off();
+ },[]);
+ useEffect(()=>{loadProducts();const params=new URLSearchParams(location.search);if(params.get('payment')==='return'&&params.get('order'))poll(params.get('order'));const close=e=>{if(menuRef.current&&!menuRef.current.contains(e.target))setMenu(false);document.querySelectorAll('details[open]').forEach(d=>{if(!d.contains(e.target))d.removeAttribute('open')})};const esc=e=>{if(e.key==='Escape'){setMenu(false);setSelected(null);setDetailsProduct(null);setRatingDraft(0);setRatingMsg('');document.querySelectorAll('details[open]').forEach(d=>d.removeAttribute('open'))}};document.addEventListener('pointerdown',close);document.addEventListener('keydown',esc);return()=>{document.removeEventListener('pointerdown',close);document.removeEventListener('keydown',esc)}},[]);
+ useEffect(()=>{
+  const id=new URLSearchParams(location.search).get('product');
+  if(!id||loading)return;
+  const found=products.find(p=>p.id===id);
+  if(found){setSelected(found);setDetailsProduct(found);window.history.replaceState({},'',location.pathname+location.hash);}
+ },[products,loading]);
+function handleNextAction(x){
+  const na=x?.nextAction||x?.next_action;
+  if(na?.redirect_url?.url){location.href=na.redirect_url.url;return true}
+  const kind=normalizeAuthKind(na);
+  if(kind){
+    // There is only one payment-auth challenge at a time. Replace the previous
+    // challenge instead of stacking/keeping an obsolete PIN or OTP modal alive.
+    setAuthForm(emptyAuth);
+    setAuthMsg('');
+    setAuthStep({orderId:x.orderId,kind});
+    return true;
+  }
+  return false;
+}
+ async function ensureReviewEntitlement(productId,orderId,token){try{const auth=await getAnonymousAuth();await api('/api/reviews',{method:'POST',headers:{'Content-Type':'application/json','Authorization':`Bearer ${auth.idToken}`},body:JSON.stringify({action:'entitle',productId,orderId,token})})}catch{}}
+ async function poll(orderId){
+  const id=String(orderId||'').trim();
+  if(!id)return;
+  const wait=ms=>new Promise(r=>setTimeout(r,ms));
+  let lastError='';
+  for(let attempt=0;attempt<20;attempt++){
+    setSelected(prev=>({...prev,orderId:id,processing:true,paid:false,failed:false,stalled:false,error:''}));
+    setMsg(attempt===0?'Confirming payment…':'Checking payment status…');
+    try{
+      const x=await api('/api/verify',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({orderId:id})});
+      const order=x.order||{};
+      if(x.status==='paid'&&x.downloadToken){
+        const product=products.find(p=>String(p.id)===String(order.productId))||products.find(p=>String(p.name)===String(order.productName))||{};
+        const expiresAt=Date.now()+24*60*60*1000;
+        const ownedEntry={token:x.downloadToken,expiresAt,orderId:id,productId:String(order.productId||''),rating:0};
+        setOwned(prev=>{
+          const next={...prev};
+          if(order.productId)next[order.productId]=ownedEntry;
+          try{localStorage.setItem('wycode-market-owned',JSON.stringify(next))}catch{}
+          return next;
+        });
+        if(order.productId)ensureReviewEntitlement(order.productId,id,x.downloadToken);
+        setSelected(prev=>({...product,...prev,...order,orderId:id,productId:order.productId||product.id,productName:order.productName||product.name,reference:order.reference||product.reference||'',downloadToken:x.downloadToken,paid:true,processing:false,failed:false,stalled:false}));
+        setMsg('Payment successful. Your source code is ready.');
+        try{history.replaceState({},'',location.pathname+location.hash)}catch{}
+        return;
       }
-    }else setMsg(successMessage);
-    setModal(false);setEdit(null);alert(successMessage);
-   }catch(e){
-    const text=errText(e);
-    const permission=e?.code==='permission-denied' || /missing or insufficient permissions/i.test(String(e?.message||''));
-    const detail=permission
-      ? `Firestore denied this write. Make sure Firestore is using the included firestore.rules and that you are signed in as the configured Studio admin account. ${text}`
-      : text;
-    setMsg(detail);
-    alert(detail);
-   }finally{setLoading(false)}
- }
- async function remove(id){
-   if(!confirm("Archive this product? Existing orders will remain intact."))return;
-   setLoading(true);try{await updateDoc(doc(db,"products",id),{status:"archived",updatedAt:serverTimestamp()});setMsg("Product archived.")}catch(e){setMsg(errText(e));alert(errText(e))}finally{setLoading(false)}
- }
- async function login(){try{setMsg("");await signInWithPopup(auth,provider)}catch(e){setMsg(`Google sign-in failed: ${errText(e)}`)}}
- async function logout(){try{await signOut(auth)}catch(e){setMsg(`Sign-out failed: ${errText(e)}`)}}
- if(authLoading)return <div className="center"><div className="login"><div className="logo big">W</div><h1>WyCode Studio</h1><p>Checking secure session…</p></div></div>;if(!user)return <Login onLogin={login} msg={msg}/>;if(!allowed)return <Denied onLogout={logout} email={user.email}/>;
- const revenueByCurrency=orders.filter(x=>x.status==="paid").reduce((m,x)=>{const c=String(x.currency||"USD").toUpperCase();m[c]=(m[c]||0)+Number(x.amount||0);return m},{}),revenue=Object.entries(revenueByCurrency).map(([c,v])=>money(v,c)).join(" · ")||"—",list=products.filter(x=>(x.name||"").toLowerCase().includes(search.toLowerCase())||(x.category||"").toLowerCase().includes(search.toLowerCase()));
- return <div className="app"><aside><div className="brand"><div className="logo">W</div><b>WyCode<br/><small>Studio</small></b></div><nav>{[["dashboard","Dashboard",LayoutDashboard],["products","Products",Package],["orders","Orders",ShoppingBag],["customers","Customers",Users],["notifications","Notifications",Bell],["settings","Settings",SettingsIcon]].map(([id,t,I])=><button key={id} className={view===id?"active":""} onClick={()=>setView(id)}><I size={18}/>{t}</button>)}</nav><details className="helpMenu"><summary>Help & Legal</summary><a href="mailto:wytetechcompany@gmail.com?subject=WyCode%20Studio%20support">Contact</a><button type="button" onClick={()=>setView("settings")}>Privacy</button><button type="button" onClick={()=>setView("settings")}>Terms</button><button type="button" onClick={()=>setView("settings")}>About</button></details><button className="logout" onClick={logout}><LogOut size={17}/>Sign out</button></aside><main><header><div><small>PRIVATE ADMIN</small><h1>{view[0].toUpperCase()+view.slice(1)}</h1></div><div className="headRight"><button className="contactStudio" onClick={()=>location.href="mailto:wytetechcompany@gmail.com?subject=WyCode%20Studio%20payment%20or%20bug%20support&body=Issue%20type%3A%20%5BPayment%20issue%20%2F%20Bug%20%2F%20Other%5D%0A%0ADescription%3A%20%0A%0ASteps%20to%20reproduce%3A%20%0A%0ADevice%2Fbrowser%3A%20%0A%0APlease%20attach%20screenshots.%20"}>CONTACT ME</button><span>{user.email}</span></div></header>{msg&&<div className="notice">{msg}<button onClick={()=>setMsg("")}><X size={15}/></button></div>}{loading&&<div className="notice">Working…</div>}{view==="dashboard"&&<Dashboard p={products} o={orders} c={customers} r={revenue}/>} {view==="products"&&<><div className="toolbar"><div className="search"><Search size={17}/><input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search products..."/></div><button className="primary" onClick={()=>{setEdit(null);setModal(true)}}><Plus size={17}/>Add product</button></div><Table p={list} edit={x=>{setEdit(x);setModal(true)}} remove={remove}/></>}{view==="orders"&&<Orders o={orders}/>} {view==="customers"&&<Customers c={customers}/>} {view==="notifications"&&<Notifications/>} {view==="settings"&&<Settings user={user}/>}</main>{modal&&<Modal p={edit||blank} close={()=>{setModal(false);setEdit(null)}} save={save}/>}</div>
+      if(handleNextAction({...x,orderId:id}))return;
+      if(x.status==='failed'||x.status==='voided'){
+        setSelected(prev=>({...prev,...order,orderId:id,processing:false,paid:false,failed:true,error:`Payment was ${x.status}.`}));
+        return;
+      }
+      lastError='';
+    }catch(e){
+      lastError=e.message||'Could not confirm payment.';
+      if(attempt>=19){
+        setSelected(prev=>({...prev,orderId:id,processing:false,paid:false,failed:true,error:lastError}));
+        setMsg(lastError);
+        return;
+      }
+    }
+    await wait(3000);
+  }
+  setSelected(prev=>({...prev,orderId:id,processing:true,stalled:true,failed:false,error:''}));
+  setMsg('Flutterwave has not returned the final status yet.');
 }
-function pricePair(p){const usd=Number(p.priceUSD),ngn=Number(p.priceNGN);if(Number.isFinite(usd)&&usd>0&&Number.isFinite(ngn)&&ngn>0)return `${money(usd,"USD")} · ${money(ngn,"NGN")}`;return money(p.price,p.currency||"USD")}
-function Dashboard({p,o,c,r}){return <><div className="cards"><Card t="Products" v={p.length}/><Card t="Paid orders" v={o.filter(x=>x.status==="paid").length}/><Card t="Customers" v={c.length}/><Card t="Revenue" v={money(r)}/></div><div className="grid"><section className="panel"><h2>Recent products</h2>{p.length?p.slice(0,6).map(x=><div className="row" key={x.id}><span><b>{x.name}</b><small>{x.category}</small></span><b>{pricePair(x)}</b></div>):<p>No products yet.</p>}</section><section className="panel"><h2>Recent orders</h2>{o.length?o.slice(0,6).map(x=><div className="row" key={x.id}><span><b>{x.productName||"Order"}</b><small>{x.email||"—"}</small></span><b>{x.status}</b></div>):<p>No orders yet.</p>}</section></div></>}
-function Card({t,v}){return <div className="card"><small>{t}</small><strong>{v}</strong></div>}
-function Table({p,edit,remove}){return <section className="panel table"><div className="tr head"><span>Product</span><span>Price</span><span>Sales</span><span>Status</span><span>Drive</span><span/></div>{p.length?p.map(x=><div className="tr" key={x.id}><span><b>{x.name}</b>{x.saleType==="special"&&<span className="pill special">★ Special</span>}<small>{x.slug}</small></span><span>{pricePair(x)}</span><span>{Number(x.sales||0).toLocaleString()}</span><span className="pill">{x.status}</span><span>{x.driveFileId?"✓":"!"}</span><span><button onClick={()=>edit(x)} aria-label={`Edit ${x.name}`}><Pencil size={15}/></button><button onClick={()=>remove(x.id)} aria-label={`Archive ${x.name}`} title="Archive product"><Trash2 size={15}/></button></span></div>):<p>No products match your search.</p>}</section>}
-function Orders({o}){return <section className="panel table"><h2>Orders</h2>{o.length?o.map(x=><div className="tr" key={x.id}><span>{x.email||"—"}</span><span>{x.productName||"—"}</span><span>{money(x.amount)}</span><span className="pill">{x.status||"pending"}</span><span>{x.reference||"—"}</span></div>):<p>No orders yet.</p>}</section>}
-function Customers({c}){return <section className="panel table"><h2>Customers</h2>{c.length?c.map(x=><div className="tr" key={x.id}><span>{x.email||"—"}</span><span>{x.name||"—"}</span><span>{x.orders||0}</span><span>Customer</span><span/></div>):<p>No customers yet.</p>}</section>}
-function Notifications(){
- const[title,setTitle]=useState("WyCode Market Update");
- const[body,setBody]=useState("");
- const[url,setUrl]=useState("/");
- const[status,setStatus]=useState(null);
- const[busy,setBusy]=useState(false);
- async function load(){
-  try{
-   if(!auth.currentUser)throw new Error("Your session expired. Sign in again.");
-   const token=await auth.currentUser.getIdToken();
-   const res=await fetch("/api/notifications",{headers:{Authorization:`Bearer ${token}`}});
-   const j=await res.json().catch(()=>({}));
-   if(!res.ok)throw new Error(j.error||"Could not load notification status.");
-   setStatus(j);
-  }catch(e){setStatus({error:e.message||"Notification status unavailable."})}
+ async function submitAuth(){if(!authStep||authBusy)return;const{orderId,kind}=authStep;const payload={orderId,kind};if(kind==='pin'){if(!/^\d{4,6}$/.test(authForm.pin))return setAuthMsg('Enter the 4-6 digit PIN on your card.');payload.pin=authForm.pin}else if(kind==='otp'){if(!/^\d{4,8}$/.test(authForm.otp))return setAuthMsg('Enter the code sent to you.');payload.otp=authForm.otp}else if(kind==='avs'){if(!authForm.country||!authForm.city||!authForm.line1||!authForm.postal_code)return setAuthMsg('Fill in your billing address.');payload.address={country:authForm.country,city:authForm.city,state:authForm.state,postal_code:authForm.postal_code,line1:authForm.line1,line2:authForm.line2}}setAuthBusy(true);setAuthMsg('Confirming…');try{const x=await api('/api/authorize',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});if(handleNextAction({...x,orderId}))return;setAuthStep(null);return poll(orderId)}catch(e){setAuthMsg(e.message||'Could not confirm. Please try again.')}finally{setAuthBusy(false)}}
+ async function getAnonymousAuth(force=false){
+  const key=firebaseConfig.apiKey;
+  const storageKey='wycode-anonymous-auth';
+  let saved=null;try{saved=JSON.parse(localStorage.getItem(storageKey)||'null')}catch{}
+  if(!force&&saved?.idToken&&Number(saved.expiresAt||0)>Date.now()+60000)return saved;
+  if(saved?.refreshToken&&!force){
+    const rr=await fetch(`https://securetoken.googleapis.com/v1/token?key=${encodeURIComponent(key)}`,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams({grant_type:'refresh_token',refresh_token:saved.refreshToken})});
+    const rj=await rr.json().catch(()=>({}));
+    if(rr.ok&&rj.id_token){const next={idToken:rj.id_token,refreshToken:rj.refresh_token||saved.refreshToken,uid:rj.user_id||saved.uid,expiresAt:Date.now()+Math.max(60,Number(rj.expires_in||3600)-60)*1000};try{localStorage.setItem(storageKey,JSON.stringify(next))}catch{}return next}
+  }
+  const rr=await fetch(`https://identitytoolkit.googleapis.com/v1/accounts:signUp?key=${encodeURIComponent(key)}`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({returnSecureToken:true})});
+  const rj=await rr.json().catch(()=>({}));
+  if(!rr.ok||!rj.idToken)throw new Error(rj?.error?.message==='OPERATION_NOT_ALLOWED'?'Anonymous Firebase sign-in is disabled. Enable Anonymous in Firebase Authentication.':rj?.error?.message||'Could not create an anonymous review profile.');
+  const next={idToken:rj.idToken,refreshToken:rj.refreshToken,uid:rj.localId,expiresAt:Date.now()+Math.max(60,Number(rj.expiresIn||3600)-60)*1000};try{localStorage.setItem(storageKey,JSON.stringify(next))}catch{}return next;
  }
- useEffect(()=>{load()},[]);
- async function retryBatch(batchId){
-  setBusy(true);
-  try{
-   if(!auth.currentUser)throw new Error("Your session expired. Sign in again.");
-   const token=await auth.currentUser.getIdToken();
-   const res=await fetch("/api/notifications",{method:"POST",headers:{"Content-Type":"application/json",Authorization:`Bearer ${token}`},body:JSON.stringify({action:"retry_batch",batchId})});
-   const j=await res.json().catch(()=>({}));
-   if(!res.ok)throw new Error(j.error||"Batch retry failed.");
-   alert(j.sent>0?`Automatic batch resent to ${j.sent} subscriber${j.sent===1?"":"s"}.`:"No buyers are currently subscribed.");
-   await load();
-  }catch(e){alert(e.message||"Batch retry failed.")}finally{setBusy(false)}
- }
- async function send(){
-  setBusy(true);setStatus(v=>v?{...v}:null);
-  try{
-   if(!auth.currentUser)throw new Error("Your session expired. Sign in again.");
-   const cleanTitle=title.trim(),cleanBody=body.trim(),cleanUrl=url.trim()||"/";
-   if(!cleanTitle)return alert("Enter a notification title.");
-   if(!cleanBody)return alert("Enter a notification message.");
-   if(cleanTitle.length>100)return alert("Title must be 100 characters or fewer.");
-   if(cleanBody.length>300)return alert("Message must be 300 characters or fewer.");
-   const token=await auth.currentUser.getIdToken();
-   const res=await fetch("/api/notifications",{method:"POST",headers:{"Content-Type":"application/json",Authorization:`Bearer ${token}`},body:JSON.stringify({action:"custom",title:cleanTitle,body:cleanBody,url:cleanUrl})});
-   const j=await res.json().catch(()=>({}));
-   if(!res.ok)throw new Error(j.error||"Notification could not be sent.");
-   setStatus(j);
-   alert(j.sent>0?`Notification sent to ${j.sent} subscriber${j.sent===1?"":"s"}.`:"No buyers are currently subscribed.");
-  }catch(e){alert(e.message||"Notification could not be sent.")}finally{setBusy(false)}
- }
- return <section className="notificationPage">
-  <div className="panel notificationIntro"><div><small className="eyebrow">BUYER COMMUNICATION</small><h2>Notifications</h2><p>Send a custom push notification whenever you have something important to announce. This is separate from the automatic new-product notification.</p></div><div className="notificationStat"><Bell size={18}/><b>{status?.subscribers??"—"}</b><small>subscribers</small></div></div>
-  <div className="notificationGrid">
-   <section className="panel">
-    <h2>Create notification</h2>
-    <p className="muted">Keep it short and useful. The Market opens the link when the subscriber taps the alert.</p>
-    <div className="notificationForm">
-     <label>Title<input value={title} maxLength={100} onChange={e=>setTitle(e.target.value)} placeholder="e.g. Weekend source-code drop"/></label>
-     <label>Message<textarea value={body} maxLength={300} rows={5} onChange={e=>setBody(e.target.value)} placeholder="Tell subscribers what is worth checking out…"/></label>
-     <label>Market link<input value={url} onChange={e=>setUrl(e.target.value)} placeholder="/"/></label>
-     <small className="fieldHint">{title.length}/100 title · {body.length}/300 message</small>
-     <button className="primary notificationSend" type="button" onClick={send} disabled={busy}><Send size={16}/>{busy?"Sending…":"Send to subscribers"}</button>
-    </div>
-   </section>
-   <section className="panel">
-    <h2>Automatic product alerts</h2>
-    <div className="autoAlert"><span className="autoIcon">4×</span><div><b>Batch instead of spam</b><p>A published product does not immediately notify everyone. Studio collects new publishes until 4 products are available.</p></div></div>
-    <div className="autoAlert"><span className="autoIcon">↗</span><div><b>Subscriber message</b><p>The fourth publish sends: <b>“Last app and 3 others have been added, get now before the prices increase.”</b></p></div></div>
-    <div className="queueBox"><span>Currently collected</span><b>{status?.pendingPublishes??"—"} / 4</b>{status?.pendingBatches>0&&<small>{status.pendingBatches} batch notification awaiting attention.</small>}</div>
-    {status?.batches?.map(batch=><div className="failedBatch" key={batch.id}><div><b>{batch.status==="failed"?"Automatic batch failed":"Automatic batch waiting"}</b><small>{batch.products.map(x=>x.name).join(" · ")}</small>{batch.error&&<small>{batch.error}</small>}</div><button className="secondary" type="button" onClick={()=>retryBatch(batch.id)} disabled={busy}>Retry</button></div>)}
-    <p className="muted">Custom notifications sent from this page are immediate and do not change the 4-publish automatic batch.</p>
-   </section>
-  </div>
- </section>
-}
-function Settings({user}){
- const[drive,setDrive]=useState(null),[checking,setChecking]=useState(false),[notifications,setNotifications]=useState(null),[notificationBusy,setNotificationBusy]=useState(false),[notificationMsg,setNotificationMsg]=useState("");
- async function loadNotifications(){
-  try{
-   if(!auth.currentUser)throw new Error("Your session expired. Sign in again.");
-   const token=await auth.currentUser.getIdToken();
-   const res=await fetch("/api/notifications",{headers:{Authorization:`Bearer ${token}`}});
-   const j=await res.json().catch(()=>({}));
-   if(!res.ok)throw new Error(j.error||"Could not read notification status.");
-   setNotifications(j);
-  }catch(e){setNotifications({error:e.message||"Notification status unavailable."})}
- }
- async function testNotification(){
-  setNotificationBusy(true);setNotificationMsg("");
-  try{
-   if(!auth.currentUser)throw new Error("Your session expired. Sign in again.");
-   const token=await auth.currentUser.getIdToken();
-   const res=await fetch("/api/notifications",{method:"POST",headers:{"Content-Type":"application/json",Authorization:`Bearer ${token}`},body:JSON.stringify({action:"test"})});
-   const j=await res.json().catch(()=>({}));
-   if(!res.ok)throw new Error(j.error||"Test notification failed.");
-   setNotificationMsg(j.sent>0?`Test notification sent to ${j.sent} subscriber${j.sent===1?"":"s"}.`:"No buyers are currently subscribed.");
-   setNotifications(j);
-  }catch(e){setNotificationMsg(e.message||"Test notification failed.")}finally{setNotificationBusy(false)}
- }
- useEffect(()=>{loadNotifications()},[]);
+ async function loadOwnReview(productId,orderId){if(!orderId)return;try{const auth=await getAnonymousAuth();const x=await api(`/api/reviews?productId=${encodeURIComponent(productId)}&orderId=${encodeURIComponent(orderId)}`,{headers:{Authorization:`Bearer ${auth.idToken}`}});if(x.myReview){setReviewOwn(x.myReview);setReviewEditing(true);setReviewRating(Number(x.myReview.rating||0));setReviewComment(x.myReview.comment||'')}else{setReviewOwn(null);setReviewEditing(false);setReviewRating(0);setReviewComment('')}}catch{setReviewOwn(null);setReviewEditing(false)}}
+ async function openReviews(p){setReviewPage(p);setReviews([]);setReviewComment('');setReviewMsg('');setReviewRating(0);setReviewOwn(null);setReviewEditing(false);setReviewEligibleOrders([]);setReviewOrderId('');setReviewAuth(hasSavedAnonymousAuth());setReviewLoading(true);try{let url=`/api/reviews?productId=${encodeURIComponent(p.id)}`;const headers={};if(owned[p.id]?.orderId||hasSavedAnonymousAuth()){try{const a=await getAnonymousAuth();headers.Authorization=`Bearer ${a.idToken}`}catch{}}const x=await api(url,{headers});setReviews(Array.isArray(x.reviews)?x.reviews:[]);const orders=Array.isArray(x.eligibleOrders)?x.eligibleOrders:[];const direct=owned[p.id];const migrated=Object.values(owned).find(v=>v&&String(v.productId||'')===String(p.id)&&v.orderId);const fallback=direct?.orderId||migrated?.orderId||'';const selectedOrder=orders[0]||fallback||'';setReviewEligibleOrders(orders.length?orders:(fallback?[fallback]:[]));setReviewOrderId(selectedOrder);if(selectedOrder&&headers.Authorization){try{const y=await api(`/api/reviews?productId=${encodeURIComponent(p.id)}&orderId=${encodeURIComponent(selectedOrder)}`,{headers});if(y.myReview){setReviewOwn(y.myReview);setReviewEditing(true);setReviewRating(Number(y.myReview.rating||0));setReviewComment(y.myReview.comment||'')}}catch{}}}catch(e){setReviewMsg(e.message||'Could not load reviews.')}finally{setReviewLoading(false)}}
+ async function selectReviewOrder(orderId){setReviewOrderId(orderId);setReviewMsg('');setReviewOwn(null);setReviewEditing(false);setReviewRating(0);setReviewComment('');if(reviewPage?.id&&orderId)await loadOwnReview(reviewPage.id,orderId)}
+ async function startReviewSession(){if(reviewAuthBusy)return;setReviewAuthBusy(true);setReviewMsg('Creating your anonymous buyer profile…');try{await getAnonymousAuth();setReviewAuth(true);setReviewMsg('You are signed in anonymously. Your name and email will not be shown.')}catch(e){setReviewMsg(e.message||'Could not start anonymous review sign-in.')}finally{setReviewAuthBusy(false)}}
+ async function submitReview(){if(!reviewPage||reviewBusy)return;const savedEntry=owned[reviewPage.id]||Object.values(owned).find(v=>v&&String(v.productId||'')===String(reviewPage.id)&&v.orderId)||{};const entry={...savedEntry,orderId:reviewOrderId||savedEntry.orderId};if(!entry.orderId)return setReviewMsg('Only completed buyers can post a review.');if(!reviewRating)return setReviewMsg('Choose a star rating.');if(reviewComment.trim().length<3)return setReviewMsg('Please write a short review.');setReviewBusy(true);setReviewMsg('Saving your review…');try{const auth=await getAnonymousAuth();const x=await api('/api/reviews',{method:'POST',headers:{'Content-Type':'application/json','Authorization':`Bearer ${auth.idToken}`},body:JSON.stringify({productId:reviewPage.id,orderId:entry.orderId,token:entry.token||'',rating:Number(reviewRating),comment:reviewComment.trim()})});setReviews(prev=>{const rest=prev.filter(r=>r.id!==x.review.id);return [x.review,...rest]});setReviewOwn(x.review);setReviewEditing(true);setProducts(prev=>prev.map(p=>p.id===reviewPage.id?{...p,ratingAverage:Number(x.ratingAverage||0),ratingCount:Number(x.ratingCount||0)}:p));setOwned(prev=>{const next={...prev,[reviewPage.id]:{...prev[reviewPage.id],rating:Number(reviewRating)}};try{localStorage.setItem('wycode-market-owned',JSON.stringify(next))}catch{}return next});setReviewMsg('Review published. Thank you!');setReviewComment('')}catch(e){setReviewMsg(e.message||'Could not save your review.')}finally{setReviewBusy(false)}}
+ function downloadOwned(token){location.href=`/api/download?token=${encodeURIComponent(token)}`}
 
- async function checkDrive(){
-  setChecking(true);setDrive({state:"checking",message:"Checking Google Drive connection…"});
-  try{
-   if(!auth.currentUser)throw new Error("Your session expired. Sign in again.");
-   const token=await auth.currentUser.getIdToken();
-   const res=await fetch("/api/drive-status",{headers:{Authorization:`Bearer ${token}`}});
-   const j=await res.json().catch(()=>({}));
-   if(!res.ok)throw new Error(j.error||"Google Drive connection check failed");
-   setDrive({state:"ok",message:j.message||"Google Drive is connected and ready.",storage:j.storage,account:j.account,folder:j.folder,diagnostics:j.diagnostics});
-  }catch(e){setDrive({state:"error",message:e.message||"Google Drive connection check failed"});}
-  finally{setChecking(false)}
- }
- return <section className="panel"><h2>Studio settings</h2><p>Admin: <b>{user.email}</b></p><div className="security"><LockKeyhole size={20}/><span>Product source files and cover images are stored in Google Drive. Firebase Storage is not used by this Studio.</span></div><div className="security"><Cloud size={20}/><span><b>Google Drive OAuth</b><br/><small>WyCode Studio uses your authorized Google Drive account server-side. No service-account storage quota is used here.</small></span><button type="button" className="secondary" onClick={checkDrive} disabled={checking}>{checking?"Checking…":"Test connection"}</button></div><div className="security"><span style={{fontSize:22}}>🔔</span><span><b>Buyer push notifications</b><br/><small>Published products automatically notify subscribed Market buyers. Subscribers: <b>{notifications?.subscribers??"Checking…"}</b></small></span><button type="button" className="secondary" onClick={testNotification} disabled={notificationBusy}>{notificationBusy?"Sending…":"Send test"}</button></div>{notificationMsg&&<div className="driveReadyNote">{notificationMsg}</div>}{drive&&<div className={`driveStatus ${drive.state}`}><div className="driveStatusHead"><div><b>Drive status</b><small>{drive.state==="checking"?"Checking…":drive.state==="ok"?"Ready for uploads":"Upload blocked"}</small></div><span className={`statusDot ${drive.state}`}></span></div>{drive.state!=="checking"&&<div className="driveFacts"><div><span>Google account</span><b>{drive.account||"Unavailable"}</b></div><div><span>Destination folder</span><b>{drive.folder?.name||"Unavailable"}</b><small>{drive.folder?.id||"Not available"}</small></div><div><span>Storage / quota</span><b>{drive.state==="ok"?(drive.storage?.sharedDrive?"Shared Drive quota":"My Drive quota") : "Unavailable until OAuth succeeds"}</b>{drive.state==="ok"&&drive.storage&&!drive.storage.sharedDrive&&drive.storage.limit>0&&<small>{(drive.storage.free/(1024**3)).toFixed(2)} GB available</small>}</div></div>}{drive.state==="error"&&<div className="driveFailure"><b>Exact failure reason</b><p>{drive.message}</p><small>Fix the item named above, then tap “Test connection” again.</small></div>}{drive.state==="ok"&&<small className="driveReadyNote">Destination is accessible and the account can add files. Upload checks will still verify the selected file size and Drive quota before every upload.</small>}</div>}<details><summary>Privacy</summary><p>This private admin tool processes only information needed to operate the marketplace. Credentials and private source files should remain server-side.</p></details><details><summary>Terms</summary><p>Studio access is restricted to the authorized administrator. Keep credentials private and use the dashboard only to manage your own marketplace data.</p></details><details><summary>About</summary><p>WyCode Studio is the private administration panel for the personal WyCode source-code marketplace.</p></details></section>}
-function Picker({label,icon:Icon,accept,onChange,disabled,filename,helper,children}){
- return <div className="pickerField"><div className="pickerLabel"><span>{Icon&&<Icon size={15}/>} {label}</span>{filename&&<small title={filename}>{filename}</small>}</div><label className={`picker${disabled?" disabled":""}`}><input type="file" accept={accept} onChange={onChange} disabled={disabled}/><span className="pickerIcon"><Icon size={18}/></span><span className="pickerCopy"><b>{filename?"Choose another file":"Choose a file"}</b><small>{helper}</small></span><span className="pickerButton">Browse</span></label>{children}</div>
+ const reviewStats=useMemo(()=>{const count=reviews.length;if(!count)return{average:Number(reviewPage?.ratingAverage||0),count:0};const sum=reviews.reduce((a,r)=>a+Number(r.rating||0),0);return{average:Math.round((sum/count)*10)/10,count}},[reviews,reviewPage]);
+ const ratingBreakdown=useMemo(()=>{const b={5:0,4:0,3:0,2:0,1:0};reviews.forEach(r=>{const n=Number(r.rating||0);if(b[n]!==undefined)b[n]++});return b},[reviews]);
+ useEffect(()=>{if(!reviewPage)return;getAnonymousAuth().then(()=>setReviewAuth(true)).catch(()=>{});},[reviewPage?.id]);
+ const filtered=useMemo(()=>{const query=q.trim().toLowerCase();const now=Date.now();const fiveDays=5*24*60*60*1000;return products.filter(p=>{const text=`${p.name} ${p.description} ${p.category}`.toLowerCase();const matchesSearch=!query||text.includes(query);const matchesCategory=category==='All'||(category==='New Upload'?(()=>{const t=Date.parse(p.uploadedAtISO||'');return Number.isFinite(t)&&now-t>=0&&now-t<=fiveDays})():String(p.category||'Other')===category);return matchesSearch&&matchesCategory})},[products,q,category]);
+ const specials=useMemo(()=>filtered.filter(p=>p.saleType==='special'),[filtered]);
+ const topSales=useMemo(()=>[...filtered].sort((a,b)=>Number(b.sales||0)-Number(a.sales||0)).filter(p=>Number(p.sales||0)>0).slice(0,8),[filtered]);
+ function openBuy(p){setForm(emptyForm);setMsg('');const hasUSD=Number(p.priceUSD)>0,hasNGN=Number(p.priceNGN)>0;setSelectedCurrency(hasNGN?'NGN':hasUSD?'USD':String(p.currency||'USD').toUpperCase());setSelected(p);setMenu(false)}
+
+ async function checkout(){if(!selected||selected.processing)return;const fail=t=>{setMsg(t);alert(t)};const email=form.email.trim(),name=form.name.trim(),number=form.cardNumber.replace(/\s/g,'');if(name.length<2)return fail('Enter your full name.');if(!/^\S+@\S+\.\S+$/.test(email))return fail('Enter a valid email address.');if(!/^\d{12,19}$/.test(number)||!luhn(number))return fail('Enter a valid card number.');if(!/^\d{3,4}$/.test(form.cvv))return fail('Enter a valid CVV.');if(!/^(0[1-9]|1[0-2])$/.test(form.month))return fail('Enter a valid expiry month.');if(!/^\d{2,4}$/.test(form.year))return fail('Enter a valid expiry year.');const yy=Number(form.year.length===2?'20'+form.year:form.year),now=new Date(),m=Number(form.month);if(yy<2000||yy>2099)return fail('Enter an expiry year between 2000 and 2099.');if(yy<now.getFullYear()||(yy===now.getFullYear()&&m<now.getMonth()+1))return fail('Your card expiry date has passed.');setBusy(true);setMsg('Starting secure payment…');try{const x=await api('/api/checkout',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({productId:selected.id,name,email,currency:selectedCurrency,payment_method:{type:'card',card:{number,cvv:form.cvv,expiry_month:form.month,expiry_year:form.year}}})});if(handleNextAction(x))return;if(x.orderId)return poll(x.orderId);throw new Error('Payment could not be started. Please try again.')}catch(e){setMsg(e.message||'Payment failed.');alert(e.message||'Payment failed.')}finally{setBusy(false)}}
+ return <>{showPushPrompt&&<aside className="pushPrompt" role="dialog" aria-label="Enable product notifications"><button className="pushPromptClose" onClick={dismissPushPrompt} aria-label="Cancel notification prompt">×</button><div className="pushPromptIcon">🔔</div><div className="pushPromptBody"><strong>Stay updated</strong><span>Enable notifications to hear about new products and offers.</span><div className="pushPromptActions"><button className="pushPromptEnable" onClick={()=>{subscribeToPush();setShowPushPrompt(false)}} disabled={pushStatus==='working'||pushStatus==='subscribed'}>{pushStatus==='working'?'Enabling…':'Enable notifications'}</button><button className="pushPromptCancel" onClick={dismissPushPrompt}>Cancel</button></div></div></aside>}<header><div className="brand"><span className="mark">W</span><div><b>WyCode Market</b><small>Personal source-code market</small></div></div><div className="headerActions"><button className={`notifyTop ${pushStatus==='subscribed'?'on':''}`} onClick={pushStatus==='subscribed'?unsubscribeFromPush:subscribeToPush} disabled={pushStatus==='working'} aria-label={pushStatus==='subscribed'?'Turn off new product notifications':'Get notified about new products'}>{pushStatus==='working'?'…':pushStatus==='subscribed'?'🔔 On':'🔔 Get notified'}</button><button className="contactTop" onClick={contactMail}>CONTACT ME</button><div className="menuWrap" ref={menuRef}><button className="menuBtn" onClick={()=>setMenu(v=>!v)} aria-expanded={menu}>☰ Menu</button>{menu&&<div className="menuPanel"><a href="#products" onClick={()=>setMenu(false)}>Products</a><a href="#how" onClick={()=>setMenu(false)}>How it works</a><a href="#about" onClick={()=>setMenu(false)}>About</a><a href="#privacy" onClick={()=>setMenu(false)}>Privacy</a><a href="#terms" onClick={()=>setMenu(false)}>Terms</a><a href="#license" onClick={()=>setMenu(false)}>License</a><a href="#refunds" onClick={()=>setMenu(false)}>Refund policy</a><button onClick={contactMail}>Payment / bug support</button></div>}</div></div></header>{pushMsg&&<div className="pushNotice" role="status">{pushMsg}<button onClick={()=>setPushMsg("")} aria-label="Dismiss">×</button></div>}<main><section className="hero"><div><span className="pill">SOURCE CODE • UNDER $30</span><h1>Buy useful apps.<br/><em>Own the source.</em></h1><p>Ready-to-use source code for simple apps and developer tools. Preview the demo, pay securely, then download privately.</p><div className="search"><span>⌕</span><input aria-label="Search products" placeholder="Search apps, tools, categories…" value={q} onChange={e=>setQ(e.target.value)}/></div></div><div className="heroCard"><div className="code">{'{'}<br/>  build: <strong>faster</strong>,<br/>  price: <strong>fair</strong>,<br/>  source: <strong>yours</strong><br/>{'}'}</div></div></section>{specials.length>0&&<SpecialSales items={specials} onSelect={openBuy}/>} {topSales.length>0&&<section className="topSales"><div className="sectionHead"><div><span className="eyebrow">TOP SALES</span><h2>Top sales</h2></div><span>Ranked #1, #2, #3… by completed purchases</span></div><div className="topGrid">{topSales.map((p,i)=><ProductCard p={p} rank={i+1} onBuy={openBuy} onDownload={downloadOwned} onDetails={p=>{setDetailsProduct(p);setRatingDraft(Number(owned[p.id]?.rating||0));setRatingMsg('')}} onReviews={openReviews} ownedToken={owned[p.id]?.token} compact/>)}</div></section>}<section id="products"><div className="sectionHead"><div><span className="eyebrow">MARKETPLACE</span><h2>Source-code products</h2></div><span>{filtered.length} products</span></div><nav className="categoryNav" aria-label="Product categories">{CATEGORIES.map(c=><button key={c} type="button" className={category===c?"active":""} aria-current={category===c?"page":undefined} onClick={()=>setCategory(c)}>{c}</button>)}</nav>{loading?<div className="empty">Loading products…</div>:catalogError?<div className="empty"><p>{catalogError}</p><button onClick={loadProducts} disabled={retrying}>{retrying?'Retrying…':'Try again'}</button></div>:!filtered.length?<div className="empty">{q?'No products match your search.':'No products are published yet.'}</div>:<div className="grid">{filtered.map(p=><ProductCard p={p} key={p.id} onBuy={openBuy} onDownload={downloadOwned} onDetails={p=>{setDetailsProduct(p);setRatingDraft(Number(owned[p.id]?.rating||0));setRatingMsg('')}} onReviews={openReviews} ownedToken={owned[p.id]?.token}/>)}</div>}</section><section id="how" className="how"><div><span className="eyebrow">SIMPLE FLOW</span><h2>Pay once. Download privately.</h2></div><div className="steps"><div><b>01</b><h3>Choose</h3><p>Inspect the product, demo and requirements before buying.</p></div><div><b>02</b><h3>Pay</h3><p>Your card details are encrypted before WyCode sends them to Flutterwave.</p></div><div><b>03</b><h3>Download</h3><p>After server-side verification, a short-lived token unlocks your private source file.</p></div></div></section><section className="legal" id="about"><div><span className="eyebrow">LEGAL & INFORMATION</span><h2>About WyCode Market</h2><p>WyCode Market is a personal marketplace operated by an individual developer. It is not presented as a corporation, registered company, or financial institution. Products listed here are source-code projects offered directly by the developer.</p></div><details id="privacy"><summary>Privacy Policy</summary><p>We collect only information needed to operate purchases and support: checkout name, email, product/order information and technical information needed to protect the service. Payment processing is handled by Flutterwave; WyCode does not intentionally store raw card details. Product source files are stored privately in Google Drive and are delivered only after payment verification. We do not sell customer information. Because this is a personal marketplace, support and data requests are handled directly by the operator at <b>wytetechcompany@gmail.com</b>.</p></details><details id="terms"><summary>Terms of Sale</summary><p>By purchasing, you confirm that you have reviewed the product description, demo where available, requirements and license. Payment gives you the rights stated by the product's license, not ownership of WyCode's marketplace, trademarks, or unrelated projects. Do not resell or redistribute source code where the product license prohibits it. Access can be denied for fraud, chargebacks, abuse or attempts to bypass payment controls.</p></details><details id="license"><summary>License & Usage</summary><p>Unless a product states otherwise, the listed license is a single-project commercial source-code license. You may use the purchased source in the permitted project and modify it. You may not redistribute the source itself as a competing source-code package. Always read the individual product license before use.</p></details><details id="refunds"><summary>Refund & Payment Issues</summary><p>Digital source-code purchases are generally non-refundable after successful delivery because the digital files can be copied. If you were charged but cannot download, received the wrong product, or a payment failed incorrectly, contact the operator immediately with your order email, order ID, product name and a clear description. Payment disputes should be raised with WyCode first where possible so the issue can be investigated.</p></details><details><summary>Contact & Support</summary><p>For payment problems and bugs, use the <b>CONTACT ME</b> button at the top. It opens your email app with a structured report template addressed to <b>wytetechcompany@gmail.com</b>. Include screenshots and exact steps where possible.</p></details><details><summary>Disclaimer</summary><p>This marketplace is a personal developer storefront, not a company, bank, payment processor, legal service, or investment service. Product descriptions are provided in good faith. You are responsible for checking technical requirements and the individual license before purchase. These pages are general marketplace terms and are not a substitute for legal advice.</p></details></section></main><footer>© {new Date().getFullYear()} WyCode Market · Personal marketplace · <button onClick={contactMail}>Contact support</button></footer>{selected&&!selected.paid&&!selected.processing&&<div className="modal" onPointerDown={e=>{if(e.target===e.currentTarget)setSelected(null)}}><div className="modalBox"><button className="close" onClick={()=>setSelected(null)} aria-label="Close">×</button><span className="eyebrow">CHECKOUT</span><h2>{selected.name}</h2><div className="price">{Number(selected.priceUSD)>0&&Number(selected.priceNGN)>0?<><span>{money(selected.priceUSD,"USD")}</span><span className="priceSep"> · </span><span>{money(selected.priceNGN,"NGN")}</span></>:money(selected.price,selected.currency)}</div>{Number(selected.priceUSD)>0&&Number(selected.priceNGN)>0&&<div className="checkoutCurrency"><span>Pay in</span><button type="button" className={selectedCurrency==="USD"?"selected":""} onClick={()=>setSelectedCurrency("USD")}>$ USD</button><button type="button" className={selectedCurrency==="NGN"?"selected":""} onClick={()=>setSelectedCurrency("NGN")}>₦ NGN</button></div>}<input aria-label="Full name" placeholder="Full name" value={form.name} onChange={e=>setForm({...form,name:e.target.value})}/><input aria-label="Email" placeholder="Email" type="email" value={form.email} onChange={e=>setForm({...form,email:e.target.value})}/><input aria-label="Card number" placeholder="Card number" inputMode="numeric" autoComplete="cc-number" value={form.cardNumber} onChange={e=>setForm({...form,cardNumber:e.target.value})}/><div className="row"><input aria-label="Expiry month" placeholder="MM" inputMode="numeric" autoComplete="cc-exp-month" value={form.month} onChange={e=>setForm({...form,month:e.target.value})}/><input aria-label="Expiry year" placeholder="YYYY" inputMode="numeric" autoComplete="cc-exp-year" maxLength={4} value={form.year} onChange={e=>setForm({...form,year:e.target.value.replace(/\D/g,"").slice(0,4)})}/><input aria-label="CVV" placeholder="CVV" inputMode="numeric" autoComplete="cc-csc" value={form.cvv} onChange={e=>setForm({...form,cvv:e.target.value})}/></div><button className="pay" disabled={busy||!form.name||!form.email} onClick={checkout}>{busy?'Processing…':`Pay ${money(Number(selectedCurrency==='USD'?selected.priceUSD:selected.priceNGN)||selected.price,selectedCurrency||selected.currency)}`}</button>{msg&&<p className="msg" role="alert">{msg}</p>}<small>Payment is processed by Flutterwave. WyCode does not intentionally store raw card details.</small></div></div>}{authStep&&<div className="modal" onPointerDown={e=>{if(e.target===e.currentTarget)setAuthStep(null)}}><div className="modalBox"><h2>{authStep.kind==='pin'?'Enter your card PIN':authStep.kind==='otp'?'Enter verification code':'Confirm billing address'}</h2><p>{authStep.kind==='pin'?'Your bank requires your card PIN to complete this payment.':authStep.kind==='otp'?'Enter the one-time code your bank sent to your phone or email.':'Your bank requires your billing address to complete this payment.'}</p>{authStep.kind==='pin'&&<input aria-label="Card PIN" placeholder="PIN" inputMode="numeric" autoComplete="off" maxLength={6} value={authForm.pin} onChange={e=>setAuthForm({...authForm,pin:e.target.value.replace(/\D/g,'').slice(0,6)})}/>}{authStep.kind==='otp'&&<input aria-label="Verification code" placeholder="One-time code" inputMode="numeric" autoComplete="one-time-code" maxLength={8} value={authForm.otp} onChange={e=>setAuthForm({...authForm,otp:e.target.value.replace(/\D/g,'').slice(0,8)})}/>}{authStep.kind==='avs'&&<><input aria-label="Country" placeholder="Country code (e.g. US)" maxLength={2} value={authForm.country} onChange={e=>setAuthForm({...authForm,country:e.target.value.toUpperCase().slice(0,2)})}/><input aria-label="Address line 1" placeholder="Address line 1" value={authForm.line1} onChange={e=>setAuthForm({...authForm,line1:e.target.value})}/><input aria-label="Address line 2" placeholder="Address line 2 (optional)" value={authForm.line2} onChange={e=>setAuthForm({...authForm,line2:e.target.value})}/><div className="row"><input aria-label="City" placeholder="City" value={authForm.city} onChange={e=>setAuthForm({...authForm,city:e.target.value})}/><input aria-label="State" placeholder="State" value={authForm.state} onChange={e=>setAuthForm({...authForm,state:e.target.value})}/><input aria-label="Postal code" placeholder="Postal code" value={authForm.postal_code} onChange={e=>setAuthForm({...authForm,postal_code:e.target.value})}/></div></>}<button className="pay" disabled={authBusy} onClick={submitAuth}>{authBusy?'Confirming…':'Confirm'}</button><button className="ghost full" disabled={authBusy} onClick={()=>setAuthStep(null)}>Cancel</button>{authMsg&&<p className="msg" role="alert">{authMsg}</p>}<small>Do not submit another payment for the same purchase while confirming.</small></div></div>}{selected?.processing&&!authStep&&<div className="modal" onPointerDown={e=>{if(e.target===e.currentTarget)setSelected(null)}}><div className="modalBox"><h2>Confirming payment</h2><p>{msg||'Please wait…'}</p>{selected.stalled&&<><p className="msg">We are still waiting for Flutterwave to report the final status. Do not submit another payment for the same purchase.</p><button className="pay" onClick={()=>poll(selected.orderId)}>Check payment again</button><button className="ghost full" onClick={()=>setSelected(null)}>Close</button></>}</div></div>}{selected?.failed&&!authStep&&<div className="modal"><div className="modalBox"><h2>Payment not confirmed</h2><p>{selected.error||msg}</p><p className="msg">If your bank/card shows a charge, do not pay again. Contact support and include order ID <b>{selected.orderId}</b>.</p><button className="pay" onClick={()=>poll(selected.orderId)}>Check payment status</button><button className="ghost full" onClick={()=>setSelected(null)}>Close</button></div></div>}{selected?.paid&&!authStep&&<div className="modal" onPointerDown={e=>{if(e.target===e.currentTarget)setSelected(null)}}><div className="modalBox success"><span className="check">✓</span><h2>Payment verified</h2><p>{selected.productName} is ready.</p><p className="msg">Your purchase is recorded. Keep this payment reference for your records.</p><div className="referenceBox"><span>Payment reference</span><b>{selected.reference||'—'}</b></div><a className="pay" href={`/api/download?token=${encodeURIComponent(selected.downloadToken)}`}>Download source code</a><button className="ghost full" onClick={()=>setSelected(null)}>Close</button></div></div>}{detailsProduct&&<div className="modal" onPointerDown={e=>{if(e.target===e.currentTarget){setDetailsProduct(null);setRatingDraft(0);setRatingMsg('')}}}><div className="modalBox detailsModalBox"><button className="close" onClick={()=>{setDetailsProduct(null);setRatingDraft(0);setRatingMsg('')}} aria-label="Close">×</button><span className="eyebrow">PRODUCT DETAILS</span><h2>{detailsProduct.name}</h2>{detailsProduct.description&&<div className="detailBlock"><b>Description</b><p>{detailsProduct.description}</p></div>}{splitDetails(detailsProduct.features).length>0&&<div className="detailBlock"><b>Features</b><ul>{splitDetails(detailsProduct.features).map((x,i)=><li key={`f${i}`}>{x}</li>)}</ul></div>}{splitDetails(detailsProduct.requirements).length>0&&<div className="detailBlock"><b>Requirements</b><ul>{splitDetails(detailsProduct.requirements).map((x,i)=><li key={`r${i}`}>{x}</li>)}</ul></div>}{<div className="ratingDetail"><div><span className="eyebrow">RATING</span><strong>{Number(detailsProduct.ratingAverage||detailsProduct.rating||0)>0?`${Number(detailsProduct.ratingAverage||detailsProduct.rating).toFixed(1)} / 5`:'Not rated yet'}</strong>{Number(detailsProduct.ratingCount||0)>0&&<small>{Number(detailsProduct.ratingCount).toLocaleString()} rating{Number(detailsProduct.ratingCount)===1?'':'s'}</small>}</div>{ratingMsg&&<p className="ratingMsg" role="status">{ratingMsg}</p>}</div>}<div className="detailGrid"><div><span>Version</span><b>{detailsProduct.version||'—'}</b></div><div><span>Category</span><b>{detailsProduct.category||'—'}</b></div><div><span>License</span><b>{detailsProduct.license||'—'}</b></div><div><span>Sales</span><b>{Number(detailsProduct.sales||0).toLocaleString()}</b></div><div><span>Slug</span><b>{detailsProduct.slug||'—'}</b></div><div><span>Sale type</span><b>{detailsProduct.saleType==='special'?'Special sale':'Normal sale'}</b></div></div>{detailsProduct.demoUrl&&<a className="detailDemo" href={detailsProduct.demoUrl} target="_blank" rel="noopener noreferrer">Open live demo ↗</a>}<button className="ghost full" onClick={()=>{const p=detailsProduct;setDetailsProduct(null);openReviews(p)}}>Read reviews / Write a review</button><button className="pay full" onClick={()=>{const p=detailsProduct;const tok=owned[p.id]?.token;setDetailsProduct(null);setRatingDraft(0);setRatingMsg('');tok?downloadOwned(tok):openBuy(p)}}>{owned[detailsProduct.id]?.token?'Download':'Buy'}</button><button className="ghost full" onClick={()=>{setDetailsProduct(null);setRatingDraft(0);setRatingMsg('')}}>Close</button></div></div>}{reviewPage&&<div className="reviewPage"><div className="reviewPageInner">
+ <div className="reviewTopbar"><button className="reviewBack" type="button" onClick={()=>setReviewPage(null)}>← Back to market</button><span className="reviewSecure">🔒 Verified reviews</span></div>
+ <div className="reviewHero"><span className="eyebrow">BUYER REVIEWS</span><h1>{reviewPage.name}</h1><p>Real feedback from verified buyers. Reviews are anonymous to other visitors.</p></div>
+ <div className="ratingSummary">
+  <div className="ratingSummaryAvg">
+   <strong>{reviewStats.average>0?reviewStats.average.toFixed(1):'—'}</strong>
+   <div className="ratingSummaryStars" aria-label={`${reviewStats.average||0} out of 5`}>{'★'.repeat(Math.round(reviewStats.average||0))}<span>{'★'.repeat(5-Math.round(reviewStats.average||0))}</span></div>
+   <span>{reviewStats.count||Number(reviewPage.ratingCount||0)} review{(reviewStats.count||Number(reviewPage.ratingCount||0))===1?'':'s'}</span>
+  </div>
+  <div className="ratingBreakdown">{[5,4,3,2,1].map(n=>{const c=ratingBreakdown[n]||0,pct=reviews.length?Math.round((c/reviews.length)*100):0;return <div className="ratingBar" key={n}><span className="ratingBarLabel">{n}</span><div className="ratingBarTrack"><div className="ratingBarFill" style={{width:`${pct}%`}}/></div><span className="ratingBarCount">{c}</span></div>})}</div>
+ </div>
+ <section className="reviewCompose">
+  <div className="reviewComposeHead"><h2>{reviewEditing?'Edit your review':'Rate this product'}</h2><span className="reviewAnonBadge">Anonymous</span></div>
+  <p className="reviewComposeHint">Tap a star to rate, then write what you think.</p>
+  {reviewEligibleOrders.length>1&&<div className="reviewPurchasePicker"><label className="reviewLabel" htmlFor="review-purchase">Purchase to review</label><select id="review-purchase" value={reviewOrderId} onChange={e=>selectReviewOrder(e.target.value)} disabled={reviewBusy}>{reviewEligibleOrders.map((id,i)=><option key={id} value={id}>Purchase {i+1} · {id.slice(-8)}</option>)}</select></div>}
+  <div className="reviewIdentity"><span className="reviewCheck">✓</span><div><b>Verified buyer review</b><span>Only completed purchases can publish. Your public name stays <b>Anonymous buyer</b>.</span></div></div>
+  <div className="ratingPicker reviewRatingPicker" role="radiogroup" aria-label="Choose a rating from 1 to 5 stars">{[1,2,3,4,5].map(n=><button type="button" key={n} className={n<=reviewRating?'active':''} onPointerDown={e=>{if(reviewBusy)return;e.preventDefault();setReviewRating(n)}} onTouchStart={e=>{if(reviewBusy)return;e.preventDefault();setReviewRating(n)}} onMouseDown={e=>{if(reviewBusy)return;e.preventDefault();setReviewRating(n)}} onClick={()=>{if(!reviewBusy)setReviewRating(n)}} disabled={reviewBusy} aria-label={`${n} star${n===1?'':'s'}`} aria-pressed={n===reviewRating}>★</button>)}</div>
+  <div className="ratingSelectedText">{reviewRating?`${reviewRating} out of 5`:'Select a rating to continue'}</div>
+  {reviewRating>0&&<div className="reviewComposeBody"><label className="reviewLabel" htmlFor="review-comment">Your review</label><textarea id="review-comment" value={reviewComment} onChange={e=>setReviewComment(e.target.value.slice(0,1200))} placeholder="What did you think about the code, documentation, setup and value?" rows={6} maxLength={1200} disabled={reviewBusy}/><div className="reviewCounter">{reviewComment.length}/1200</div><button type="button" className="reviewPublishBtn" onClick={submitReview} disabled={reviewBusy||!reviewRating||reviewComment.trim().length<3}>{reviewBusy?(reviewEditing?'Saving review…':'Publishing review…'):(reviewEditing?'Update review':'Publish review')}<span>→</span></button></div>}
+  {!reviewOrderId&&<div className="reviewRequirement"><b>Purchase verification required</b><span>Open the successful purchase/download flow on this device once, then return here. Your purchase reference is used only to verify eligibility.</span></div>}
+  {reviewMsg&&<div className={`reviewNotice ${/published|updated|saved/i.test(reviewMsg)?'success':''}`} role="status">{reviewMsg}</div>}
+  <small className="reviewPrivacy">Your email, payment details and identity are never shown publicly.</small>
+ </section>
+ <section className="reviewFeed">
+  <div className="reviewFeedHead"><h2>Reviews <span>{reviews.length}</span></h2><span className="reviewVerifiedLabel">✓ Verified purchases</span></div>
+  {reviewLoading?<div className="reviewEmpty"><span className="reviewSpinner"/>Loading reviews…</div>:!reviews.length?<div className="reviewEmpty"><div className="reviewEmptyIcon">★</div><h3>No reviews yet</h3><p>Be the first verified buyer to share your experience.</p></div>:reviews.map(r=><article className="reviewCard" key={r.id}><div className="reviewAvatar" style={{background:avatarColor(r.id)}}>A</div><div className="reviewCardBody"><div className="reviewCardTop"><b>Anonymous buyer</b><span className="verifiedChip">✓ Verified</span></div><div className="reviewCardMeta"><div className="reviewStars" aria-label={`${r.rating} out of 5 stars`}>{'★'.repeat(Number(r.rating||0))}<span>{'★'.repeat(Math.max(0,5-Number(r.rating||0)))}</span></div><span className="reviewDate">{timeAgo(r.updatedAt||r.createdAt)}</span></div><p>{r.comment}</p></div></article>)}
+ </section>
+</div></div>}</>
 }
-function SelectPicker({label,name,value,onChange,options,icon:Icon}){
- const[open,setOpen]=useState(false), root=React.useRef(null);
- useEffect(()=>{const close=e=>{if(root.current&&!root.current.contains(e.target))setOpen(false)};document.addEventListener("pointerdown",close);return()=>document.removeEventListener("pointerdown",close)},[]);
- const current=options.find(o=>o.value===value)||options[0];
- return <div className="selectField" ref={root}><span className="selectLabel">{Icon&&<Icon size={15}/>} {label}</span><input type="hidden" name={name} value={value}/><div className="customSelect"><button type="button" className="selectTrigger" aria-expanded={open} onClick={()=>setOpen(v=>!v)}><span>{current?.label||value}</span><span className="selectChevron">⌄</span></button>{open&&<div className="selectMenu">{options.map(o=><button type="button" key={o.value} className={o.value===value?"selected":""} onClick={()=>{onChange({target:{value:o.value}});setOpen(false)}}>{o.label}{o.value===value&&<span>✓</span>}</button>)}</div>}</div></div>
+
+function ProductCard({p,onBuy,onDownload,onDetails,onReviews,ownedToken,rank,compact=false}){
+ const usd=Number(p.priceUSD),ngn=Number(p.priceNGN);
+ return <article className={'card '+(compact?'compact':'')}>
+  <div className={'cover '+(p.coverUrl?'hasImage':'noImage')}>{p.coverUrl?<><img src={p.coverUrl} alt={`${p.name} preview`} onError={e=>{e.currentTarget.style.display="none"}}/><span className="coverFallback">&lt;/&gt;</span></>:<span className="coverFallback">&lt;/&gt;</span>}{rank&&<b className="rank">#{rank}</b>}{p.saleType==='special'&&<span className="saleBadge">SPECIAL</span>}</div>
+  <div className="cardBody"><span className="tag">{p.category}</span><h3>{p.name}</h3><p>{p.description}</p><div className="meta"><span>{p.version?'v'+p.version:'Source code'}</span><strong>{usd>0&&ngn>0?`${money(usd,"USD")} · ${money(ngn,"NGN")}`:money(p.price,p.currency)}</strong></div><div className="ratingRow"><span className="stars" aria-label={`${Number(p.ratingAverage||p.rating||0).toFixed(1)} out of 5 stars`}>{'★'.repeat(Math.round(Number(p.ratingAverage||p.rating||0)))}<span className="emptyStars">{'★'.repeat(Math.max(0,5-Math.round(Number(p.ratingAverage||p.rating||0))))}</span></span><b>{Number(p.ratingAverage||p.rating||0)>0?Number(p.ratingAverage||p.rating).toFixed(1):'New'}</b>{Number(p.ratingCount||0)>0&&<span>({Number(p.ratingCount).toLocaleString()})</span>}</div><div className="salesCount">{Number(p.sales||0).toLocaleString()} {Number(p.sales||0)===1?'sale':'sales'}</div>
+   <div className="cardLinks"><button type="button" className="detailsBtn" onClick={()=>onDetails(p)}><span>More Details</span><span className="detailsChevron">›</span></button><button type="button" className="reviewsBtn" onClick={()=>onReviews(p)}>Reviews {Number(p.ratingCount||0)>0?`(${Number(p.ratingCount).toLocaleString()})`:''}</button></div>
+   <div className="actions">{p.demoUrl&&<a className="ghost" href={p.demoUrl} target="_blank" rel="noopener noreferrer">Demo</a>}{ownedToken?<a className="pay" href={`/api/download?token=${encodeURIComponent(ownedToken)}`}>Download</a>:<button onClick={()=>onBuy(p)}>Buy</button>}</div>
+  </div></article>
 }
-function Modal({p,close,save}){
- const[driveFileId,setDriveFileId]=useState(p.driveFileId||"");
- const[fileName,setFileName]=useState("");
- const[uploading,setUploading]=useState(false),[uploadMsg,setUploadMsg]=useState("");
- const[coverUrl,setCoverUrl]=useState(p.coverUrl||""),[coverName,setCoverName]=useState("");
- const[coverUploading,setCoverUploading]=useState(false),[coverMsg,setCoverMsg]=useState("");
- const[bannerUrl,setBannerUrl]=useState(p.bannerUrl||""),[bannerName,setBannerName]=useState("");
- const[bannerUploading,setBannerUploading]=useState(false),[bannerMsg,setBannerMsg]=useState("");
- const[saleType,setSaleType]=useState(p.saleType||"normal");
- const[status,setStatus]=useState(p.status||"draft");
- const[category,setCategory]=useState(p.category||"Developer Tools");
- const legacyPrice=Number(p.price)||0;
- const initialUSD=Number.isFinite(Number(p.priceUSD))&&Number(p.priceUSD)>0?Number(p.priceUSD):(String(p.currency||"").toUpperCase()==="USD"?legacyPrice:0);
- const initialNGN=Number.isFinite(Number(p.priceNGN))&&Number(p.priceNGN)>0?Number(p.priceNGN):(String(p.currency||"").toUpperCase()==="NGN"?legacyPrice:0);
- const[priceUSD,setPriceUSD]=useState(initialUSD||"");
- const[priceNGN,setPriceNGN]=useState(initialNGN||"");
- const fields=["name","slug","description","version","demoUrl","features","requirements","license"];
- async function uploadImage(file,setUrl,setName,setBusy,setMsg,label,kind){
-  if(!file)return;
-  if(!file.type.startsWith("image/")){setMsg("Please choose an image file.");alert(`Invalid ${label.toLowerCase()}: please choose an image file.`);return}
-  if(file.size>MAX_COVER_BYTES){setMsg(`${label} is larger than 2 MB.`);alert(`Invalid ${label.toLowerCase()}: images must be 2 MB or smaller.`);return}
-  setBusy(true);setMsg(`Uploading ${file.name}…`);
-  try{
-   if(!auth.currentUser)throw new Error("Your session expired. Sign in again.");
-   const idToken=await auth.currentUser.getIdToken();
-   const dataBase64=await new Promise((resolve,reject)=>{const r=new FileReader();r.onload=()=>resolve(String(r.result).split(",")[1]||"");r.onerror=()=>reject(new Error("Could not read the selected image"));r.readAsDataURL(file)});
-   const res=await fetch("/api/upload",{method:"POST",headers:{"Content-Type":"application/json",Authorization:`Bearer ${idToken}`},body:JSON.stringify({filename:file.name,mimeType:file.type,dataBase64,kind})});
-   const j=await res.json().catch(()=>({}));
-   if(!res.ok){const err=new Error(j.error||`${label} upload failed`);err.code=j.code;throw err;}
-   setUrl(j.viewUrl||j.downloadUrl||"");setName(j.name||file.name);setMsg(`✓ ${label} uploaded to Google Drive.`);setUploadMsg("");
-  }catch(err){const text=err.code?`${err.message} [${err.code}]`:err.message||`${label} upload failed`;setMsg(text);alert(text)}finally{setBusy(false)}
- }
- function handleCover(e){uploadImage(e.target.files?.[0],setCoverUrl,setCoverName,setCoverUploading,setCoverMsg,"Cover image","cover")}
- function handleBanner(e){uploadImage(e.target.files?.[0],setBannerUrl,setBannerName,setBannerUploading,setBannerMsg,"Special sale banner","special-cover")}
- async function handleFile(e){
-  const file=e.target.files?.[0];if(!file)return;
-  if(!/\.zip$/i.test(file.name)){setUploadMsg("Please choose a ZIP source archive.");alert("Invalid upload: product source files must be ZIP archives.");e.target.value="";return}
-  if(file.size>MAX_SOURCE_BYTES){setUploadMsg("File is larger than 3 MB. Upload it to Drive manually and paste its file ID instead.");alert("Invalid upload: direct source uploads are limited to 3 MB. Upload the larger ZIP to Google Drive manually and paste its file ID.");e.target.value="";return}
-  setCoverMsg("");setBannerMsg("");setUploading(true);setUploadMsg(`Uploading ${file.name}…`);
-  try{
-   if(!auth.currentUser)throw new Error("Your session expired. Sign in again.");
-   const idToken=await auth.currentUser.getIdToken();
-   const dataBase64=await new Promise((resolve,reject)=>{const r=new FileReader();r.onload=()=>resolve(String(r.result).split(",")[1]||"");r.onerror=()=>reject(new Error("Could not read the selected file"));r.readAsDataURL(file)});
-   const res=await fetch("/api/upload",{method:"POST",headers:{"Content-Type":"application/json",Authorization:`Bearer ${idToken}`},body:JSON.stringify({filename:file.name,mimeType:file.type||"application/octet-stream",dataBase64,kind:"source"})});
-   const j=await res.json().catch(()=>({}));if(!res.ok){const err=new Error(j.error||"Upload failed");err.code=j.code;throw err;}
-   setDriveFileId(j.fileId);setFileName(j.name||file.name);setUploadMsg(`✓ Uploaded "${j.name||file.name}" to Google Drive. Drive file ID filled in below.`);
-  }catch(err){const text=err.code?`${err.message} [${err.code}]`:err.message||"Upload failed";setUploadMsg(text);alert(text)}finally{setUploading(false)}
- }
- return <div className="back" onPointerDown={e=>{if(e.target===e.currentTarget)close()}}><form className="modal" onSubmit={save}><div className="modalhead"><div><small className="eyebrow">PRODUCT EDITOR</small><h2>{p.id?"Edit product":"Add product"}</h2></div><button type="button" onClick={close} aria-label="Close"><X/></button></div><div className="form">{fields.map(k=><label key={k} className={k==="description"?"wideField":""}>{k}<input name={k} defaultValue={p[k]??""} required={["name","description","version"].includes(k)} type="text"/></label>)}<label>USD price<input name="priceUSD" type="number" min="0.01" step="0.01" placeholder="e.g. 9.99" value={priceUSD} onChange={e=>setPriceUSD(e.target.value)}/><small className="fieldHint">Customer-facing dollar price</small></label><label>NGN price<input name="priceNGN" type="number" min="0.01" step="0.01" placeholder="e.g. 15000" value={priceNGN} onChange={e=>setPriceNGN(e.target.value)}/><small className="fieldHint">Customer-facing naira price</small></label>
- <Picker label="Product source ZIP" icon={FileArchive} accept=".zip,application/zip" onChange={handleFile} disabled={uploading} filename={fileName} helper="ZIP archive · direct upload up to 3 MB" />
- {uploadMsg&&<small className="notice inlineNotice">{uploadMsg}</small>}
- <label>Google Drive file ID{driveFileId?"":" (or upload a file above)"}<input name="driveFileId" value={driveFileId} onChange={e=>setDriveFileId(e.target.value)} placeholder="Auto-filled after upload, or paste manually"/></label>
- <Picker label="Cover image" icon={ImageIcon} accept="image/*" onChange={handleCover} disabled={coverUploading} filename={coverName} helper="PNG/JPG/WebP · max 2 MB · recommended 800×400px"><div className="imagePreview">{coverUrl?<img src={coverUrl} alt="Cover preview"/>:<div className="emptyPreview">No cover selected</div>}</div></Picker>
- {coverMsg&&<small className="notice inlineNotice">{coverMsg}</small>}<input type="hidden" name="coverUrl" value={coverUrl} readOnly/>
- <SelectPicker label="Status" name="status" value={status} onChange={e=>setStatus(e.target.value)} icon={LockKeyhole} options={[{value:"draft",label:"Draft — hidden from buyers"},{value:"published",label:"Published — visible in market"},{value:"archived",label:"Archived — no longer for sale"}]}/>
- <SelectPicker label="Category" name="category" value={category} onChange={e=>setCategory(e.target.value)} icon={Tag} options={["Developer Tools","Productivity","Business","Creative","Utilities","Other","AI","Games","Education","Finance"].map(x=>({value:x,label:x}))}/>
- <SelectPicker label="Sale type" name="saleType" value={saleType} onChange={e=>setSaleType(e.target.value)} icon={Sparkles} options={[{value:"normal",label:"Normal sale"},{value:"special",label:"Special sale — featured carousel"}]}/>
- {saleType==="special"&&<Picker label="Special sale cover / banner" icon={ImageIcon} accept="image/*" onChange={handleBanner} disabled={bannerUploading} filename={bannerName} helper="PNG/JPG/WebP · max 2 MB · recommended 520×280px"><div className="imagePreview bannerPreview">{bannerUrl?<img src={bannerUrl} alt="Special sale banner preview"/>:<div className="emptyPreview">No special banner selected</div>}</div></Picker>}
- {bannerMsg&&saleType==="special"&&<small className="notice inlineNotice">{bannerMsg}</small>}
- <input type="hidden" name="bannerUrl" value={bannerUrl} readOnly/>
- </div><button className="primary" type="submit" disabled={uploading||coverUploading||bannerUploading}>{uploading?"Uploading source…":coverUploading?"Uploading cover…":bannerUploading?"Uploading banner…":"Save product"}</button></form></div>
-}
-function Login({onLogin,msg}){return <div className="center"><div className="login"><div className="logo big">W</div><h1>WyCode Studio</h1><p>Private control center for your source-code marketplace.</p>{msg&&<div className="notice">{msg}</div>}<button className="primary full" onClick={onLogin}>Continue with Google</button></div></div>}
-function Denied({onLogout,email}){return <div className="center"><div className="login"><LockKeyhole/><h1>Access denied</h1><p>{email} is not authorized to access this private Studio.</p><button onClick={onLogout}>Sign out</button></div></div>}
-createRoot(document.getElementById("root")).render(<App/>);
+function SpecialSales({items,onSelect}){const loop=[...items,...items],dur=`${Math.max(14,items.length*7)}s`;return <section className="specialTop"><div className="sectionHead"><div><span className="eyebrow">SPECIAL SALES</span><h2>Limited-time drops</h2></div><span>Featured first</span></div><div className="carousel"><div className="carouselTrack" style={{'--dur':dur}}>{loop.map((p,i)=><button type="button" className="carouselItem" key={`${p.id}:${i}`} onClick={()=>onSelect(p)}>{p.bannerUrl?<img src={p.bannerUrl} alt={`${p.name} special sale banner`}/>:<span className="carouselFallback">{p.name}</span>}<span className="carouselPrice">{money(p.price,p.currency)}</span></button>)}</div></div></section>}
+createRoot(document.getElementById('root')).render(<App/>);

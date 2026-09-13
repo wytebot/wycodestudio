@@ -1,29 +1,9 @@
 rules_version = '2';
+
 service cloud.firestore {
   match /databases/{database}/documents {
-    // WyCode Studio admin. Keep this identical to the Studio login allowlist.
-    function isStudioAdmin() {
-      return request.auth != null &&
-             request.auth.token.email == "frenemy566@gmail.com";
-    }
-
-    // Studio needs direct browser access to manage these collections.
-    // The Market itself uses the Firebase Admin SDK server-side.
-    match /products/{id} {
-      allow read, write: if isStudioAdmin();
-    }
-
-    match /orders/{id} {
-      allow read: if isStudioAdmin();
-      allow write: if false;
-    }
-
-    match /customers/{id} {
-      allow read: if isStudioAdmin();
-      allow write: if false;
-    }
-
-    // Everything else remains closed to browser clients.
+    // The web app talks to Firestore through the Vercel API using the
+    // Firebase Admin SDK. Browser clients have no direct Firestore access.
     match /{document=**} {
       allow read, write: if false;
     }
