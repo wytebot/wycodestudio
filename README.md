@@ -1,4 +1,4 @@
-# WyCode Studio v1.1.8
+# WyCode Studio v1.2.1
 
 Private admin dashboard for the WyCode source-code marketplace.
 
@@ -78,7 +78,7 @@ npm run dev
 
 ## Security boundary
 
-The Studio frontend bundle must never contain Flutterwave secret keys, Google OAuth client secrets, Google Drive refresh tokens, or payment-verification secrets. Those live only in server-side Vercel environment variables and `api/upload.js` — the browser only ever sees the admin's own Firebase sign-in token and the resulting Drive file ID.
+The Studio frontend bundle must never contain Flutterwave secret keys, Google OAuth client secrets, Google Drive refresh tokens, Firebase Admin service-account credentials, or payment-verification secrets. Those live only in server-side Vercel environment variables and `api/upload.js` — the browser only ever sees the admin's own Firebase sign-in token and the resulting Drive file ID.
 
 Before accepting real purchases, implement the shared server-side backend for:
 1. Flutterwave payment verification.
@@ -144,3 +144,29 @@ After saving the Production variables, redeploy the Studio. Sign in with the all
 - **`DRIVE_FOLDER_PERMISSION`**: the connected OAuth account cannot add files to the destination folder.
 
 The refresh token is long-lived but can be revoked by Google or by changing the account's security/consent state. If that happens, generate a replacement refresh token and update the Vercel variable.
+
+
+## Buyer push notifications (FCM)
+
+WyCode Market can let buyers opt in to browser push notifications. When a Studio product changes from Draft/Archived to **Published**, Studio automatically sends one FCM notification to all active subscribers. Editing an already-published product does not send a duplicate notification. The notification uses the Market icon and opens the Market when tapped.
+
+Studio controls this flow through `/api/notifications`. The Settings page shows the current subscriber count and includes **Send test** so you can verify FCM before publishing a product.
+
+Add these Vercel **Production** environment variables:
+- `FIREBASE_SERVICE_ACCOUNT_JSON` — Firebase Admin service-account JSON for the same Firebase project. Server-only; never use `VITE_` and never expose it to the browser.
+- `MARKET_URL` — the deployed WyCode Market URL, for example `https://your-market-domain.vercel.app`.
+
+The service account needs Firebase Cloud Messaging / Firebase Admin access and Firestore access to the shared project's `notificationSubscribers` and `notificationDeliveries` collections.
+
+The Studio API removes invalid/expired FCM registration tokens automatically. Notification delivery failure never rolls back a successfully saved product; Studio reports the exact notification failure in the dashboard instead.
+
+### Publish notification flow
+1. Buyer opens Market and chooses **Get notified**.
+2. Market requests browser notification permission and obtains an FCM web registration token using the configured VAPID key.
+3. Market registers that token server-side in Firestore.
+4. Studio publishes a product.
+5. Studio calls its protected notification endpoint with the saved product ID.
+6. The endpoint re-reads the product from Firestore, confirms it is published, prevents duplicate delivery for that product, then sends the notification through FCM.
+7. The buyer's service worker displays the Market icon and opens the Market on notification click.
+
+Do not manually edit the generated `public/firebase-messaging-sw.js`; it is regenerated during `npm run build`.

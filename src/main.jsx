@@ -63,8 +63,26 @@ function App(){
    try{
     const dup=products.some(x=>x.id!==edit?.id&&String(x.slug||"").toLowerCase()===productSlug.toLowerCase());
     if(dup){return fail(`Slug "${productSlug}" is already used.`)}
-    if(edit)await updateDoc(doc(db,"products",edit.id),d);else await addDoc(collection(db,"products"),{...d,createdAt:serverTimestamp(),sales:0});
-    setModal(false);setEdit(null);setMsg("✓ Product saved successfully.");alert("Product saved successfully.");
+    let savedId=edit?.id||"";
+    if(edit)await updateDoc(doc(db,"products",edit.id),d);
+    else {const created=await addDoc(collection(db,"products"),{...d,createdAt:serverTimestamp(),sales:0});savedId=created.id;}
+    const becamePublished=d.status==="published"&&(!edit||String(edit.status||"")!=="published");
+    let successMessage="✓ Product saved successfully.";
+    if(becamePublished&&savedId){
+      try{
+        if(!auth.currentUser)throw new Error("Your Studio session expired. Sign in again.");
+        const token=await auth.currentUser.getIdToken();
+        const nr=await fetch("/api/notifications",{method:"POST",headers:{"Content-Type":"application/json",Authorization:`Bearer ${token}`},body:JSON.stringify({action:"new_product",productId:savedId})});
+        const nj=await nr.json().catch(()=>({}));
+        if(!nr.ok)throw new Error(nj.error||"Notification delivery could not be started.");
+        successMessage=nj.sent>0?`✓ Product published and notification sent to ${nj.sent} subscriber${nj.sent===1?"":"s"}.`:"✓ Product published. No buyers are subscribed to notifications yet.";
+        setMsg(successMessage);
+      }catch(ne){
+        successMessage=`✓ Product published, but buyer notification was not sent: ${ne.message||"notification service unavailable"}`;
+        setMsg(successMessage);
+      }
+    }else setMsg(successMessage);
+    setModal(false);setEdit(null);alert(successMessage);
    }catch(e){
     const text=errText(e);
     const permission=e?.code==='permission-denied' || /missing or insufficient permissions/i.test(String(e?.message||''));
@@ -92,7 +110,31 @@ function Table({p,edit,remove}){return <section className="panel table"><div cla
 function Orders({o}){return <section className="panel table"><h2>Orders</h2>{o.length?o.map(x=><div className="tr" key={x.id}><span>{x.email||"—"}</span><span>{x.productName||"—"}</span><span>{money(x.amount)}</span><span className="pill">{x.status||"pending"}</span><span>{x.reference||"—"}</span></div>):<p>No orders yet.</p>}</section>}
 function Customers({c}){return <section className="panel table"><h2>Customers</h2>{c.length?c.map(x=><div className="tr" key={x.id}><span>{x.email||"—"}</span><span>{x.name||"—"}</span><span>{x.orders||0}</span><span>Customer</span><span/></div>):<p>No customers yet.</p>}</section>}
 function Settings({user}){
- const[drive,setDrive]=useState(null),[checking,setChecking]=useState(false);
+ const[drive,setDrive]=useState(null),[checking,setChecking]=useState(false),[notifications,setNotifications]=useState(null),[notificationBusy,setNotificationBusy]=useState(false),[notificationMsg,setNotificationMsg]=useState("");
+ async function loadNotifications(){
+  try{
+   if(!auth.currentUser)throw new Error("Your session expired. Sign in again.");
+   const token=await auth.currentUser.getIdToken();
+   const res=await fetch("/api/notifications",{headers:{Authorization:`Bearer ${token}`}});
+   const j=await res.json().catch(()=>({}));
+   if(!res.ok)throw new Error(j.error||"Could not read notification status.");
+   setNotifications(j);
+  }catch(e){setNotifications({error:e.message||"Notification status unavailable."})}
+ }
+ async function testNotification(){
+  setNotificationBusy(true);setNotificationMsg("");
+  try{
+   if(!auth.currentUser)throw new Error("Your session expired. Sign in again.");
+   const token=await auth.currentUser.getIdToken();
+   const res=await fetch("/api/notifications",{method:"POST",headers:{"Content-Type":"application/json",Authorization:`Bearer ${token}`},body:JSON.stringify({action:"test"})});
+   const j=await res.json().catch(()=>({}));
+   if(!res.ok)throw new Error(j.error||"Test notification failed.");
+   setNotificationMsg(j.sent>0?`Test notification sent to ${j.sent} subscriber${j.sent===1?"":"s"}.`:"No buyers are currently subscribed.");
+   setNotifications(j);
+  }catch(e){setNotificationMsg(e.message||"Test notification failed.")}finally{setNotificationBusy(false)}
+ }
+ useEffect(()=>{loadNotifications()},[]);
+
  async function checkDrive(){
   setChecking(true);setDrive({state:"checking",message:"Checking Google Drive connection…"});
   try{
@@ -105,7 +147,7 @@ function Settings({user}){
   }catch(e){setDrive({state:"error",message:e.message||"Google Drive connection check failed"});}
   finally{setChecking(false)}
  }
- return <section className="panel"><h2>Studio settings</h2><p>Admin: <b>{user.email}</b></p><div className="security"><LockKeyhole size={20}/><span>Product source files and cover images are stored in Google Drive. Firebase Storage is not used by this Studio.</span></div><div className="security"><Cloud size={20}/><span><b>Google Drive OAuth</b><br/><small>WyCode Studio uses your authorized Google Drive account server-side. No service-account storage quota is used here.</small></span><button type="button" className="secondary" onClick={checkDrive} disabled={checking}>{checking?"Checking…":"Test connection"}</button></div>{drive&&<div className={`driveStatus ${drive.state}`}><div className="driveStatusHead"><div><b>Drive status</b><small>{drive.state==="checking"?"Checking…":drive.state==="ok"?"Ready for uploads":"Upload blocked"}</small></div><span className={`statusDot ${drive.state}`}></span></div>{drive.state!=="checking"&&<div className="driveFacts"><div><span>Google account</span><b>{drive.account||"Unavailable"}</b></div><div><span>Destination folder</span><b>{drive.folder?.name||"Unavailable"}</b><small>{drive.folder?.id||"Not available"}</small></div><div><span>Storage / quota</span><b>{drive.state==="ok"?(drive.storage?.sharedDrive?"Shared Drive quota":"My Drive quota") : "Unavailable until OAuth succeeds"}</b>{drive.state==="ok"&&drive.storage&&!drive.storage.sharedDrive&&drive.storage.limit>0&&<small>{(drive.storage.free/(1024**3)).toFixed(2)} GB available</small>}</div></div>}{drive.state==="error"&&<div className="driveFailure"><b>Exact failure reason</b><p>{drive.message}</p><small>Fix the item named above, then tap “Test connection” again.</small></div>}{drive.state==="ok"&&<small className="driveReadyNote">Destination is accessible and the account can add files. Upload checks will still verify the selected file size and Drive quota before every upload.</small>}</div>}<details><summary>Privacy</summary><p>This private admin tool processes only information needed to operate the marketplace. Credentials and private source files should remain server-side.</p></details><details><summary>Terms</summary><p>Studio access is restricted to the authorized administrator. Keep credentials private and use the dashboard only to manage your own marketplace data.</p></details><details><summary>About</summary><p>WyCode Studio is the private administration panel for the personal WyCode source-code marketplace.</p></details></section>}
+ return <section className="panel"><h2>Studio settings</h2><p>Admin: <b>{user.email}</b></p><div className="security"><LockKeyhole size={20}/><span>Product source files and cover images are stored in Google Drive. Firebase Storage is not used by this Studio.</span></div><div className="security"><Cloud size={20}/><span><b>Google Drive OAuth</b><br/><small>WyCode Studio uses your authorized Google Drive account server-side. No service-account storage quota is used here.</small></span><button type="button" className="secondary" onClick={checkDrive} disabled={checking}>{checking?"Checking…":"Test connection"}</button></div><div className="security"><span style={{fontSize:22}}>🔔</span><span><b>Buyer push notifications</b><br/><small>Published products automatically notify subscribed Market buyers. Subscribers: <b>{notifications?.subscribers??"Checking…"}</b></small></span><button type="button" className="secondary" onClick={testNotification} disabled={notificationBusy}>{notificationBusy?"Sending…":"Send test"}</button></div>{notificationMsg&&<div className="driveReadyNote">{notificationMsg}</div>}{drive&&<div className={`driveStatus ${drive.state}`}><div className="driveStatusHead"><div><b>Drive status</b><small>{drive.state==="checking"?"Checking…":drive.state==="ok"?"Ready for uploads":"Upload blocked"}</small></div><span className={`statusDot ${drive.state}`}></span></div>{drive.state!=="checking"&&<div className="driveFacts"><div><span>Google account</span><b>{drive.account||"Unavailable"}</b></div><div><span>Destination folder</span><b>{drive.folder?.name||"Unavailable"}</b><small>{drive.folder?.id||"Not available"}</small></div><div><span>Storage / quota</span><b>{drive.state==="ok"?(drive.storage?.sharedDrive?"Shared Drive quota":"My Drive quota") : "Unavailable until OAuth succeeds"}</b>{drive.state==="ok"&&drive.storage&&!drive.storage.sharedDrive&&drive.storage.limit>0&&<small>{(drive.storage.free/(1024**3)).toFixed(2)} GB available</small>}</div></div>}{drive.state==="error"&&<div className="driveFailure"><b>Exact failure reason</b><p>{drive.message}</p><small>Fix the item named above, then tap “Test connection” again.</small></div>}{drive.state==="ok"&&<small className="driveReadyNote">Destination is accessible and the account can add files. Upload checks will still verify the selected file size and Drive quota before every upload.</small>}</div>}<details><summary>Privacy</summary><p>This private admin tool processes only information needed to operate the marketplace. Credentials and private source files should remain server-side.</p></details><details><summary>Terms</summary><p>Studio access is restricted to the authorized administrator. Keep credentials private and use the dashboard only to manage your own marketplace data.</p></details><details><summary>About</summary><p>WyCode Studio is the private administration panel for the personal WyCode source-code marketplace.</p></details></section>}
 function Picker({label,icon:Icon,accept,onChange,disabled,filename,helper,children}){
  return <div className="pickerField"><div className="pickerLabel"><span>{Icon&&<Icon size={15}/>} {label}</span>{filename&&<small title={filename}>{filename}</small>}</div><label className={`picker${disabled?" disabled":""}`}><input type="file" accept={accept} onChange={onChange} disabled={disabled}/><span className="pickerIcon"><Icon size={18}/></span><span className="pickerCopy"><b>{filename?"Choose another file":"Choose a file"}</b><small>{helper}</small></span><span className="pickerButton">Browse</span></label>{children}</div>
 }
