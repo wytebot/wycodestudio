@@ -1,3 +1,0 @@
-// Firebase Storage is intentionally unused by WyCode Studio.
-// Product files and cover images are stored in Google Drive via /api/upload.
-// Do not deploy Storage rules for this Studio unless another app in the same Firebase project needs them.
