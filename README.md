@@ -37,3 +37,6 @@ Deploy this directory as its own Vercel project with Root Directory set to the r
 
 ## Vercel deployment isolation
 Deploy this directory as its **own Vercel project**. Do not deploy it as a second root inside the Market Vercel project. Set Root Directory to `./`, Framework Preset to Vite, Build Command to `npm run build`, and Output Directory to `dist`. If a previously deployed URL still shows WyCode Market, open the Vercel deployment's **Source/Commit** and confirm it is this Admin repository; then redeploy this project. The HTML is configured with `Cache-Control: no-store` so stale HTML is not retained after a new deployment.
+
+## Authentication
+Admin access uses Google sign-in only. The backend also requires the Firebase token to have `google.com` as its sign-in provider and then checks `ADMIN_UIDS`.
