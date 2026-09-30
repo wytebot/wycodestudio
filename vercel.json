@@ -4,7 +4,7 @@
   "crons": [
     {
       "path": "/api/email-worker",
-      "schedule": "*/5 * * * *"
+      "schedule": "0 2 * * *"
     }
   ],
   "rewrites": [
