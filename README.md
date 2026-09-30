@@ -24,3 +24,16 @@ Required variables are in `.env.example`.
 - Seller balances are credited only after server-side Flutterwave verification.
 - Automatic seller payouts release USD balance in $50 thresholds when valid bank details exist; provider status is recorded as submitted/pending/failed.
 - Seller source archives remain in seller-controlled Google Drive. Static code audits read the ZIP and store only audit metadata/errors.
+
+## Vercel deployment
+Deploy this directory as its own Vercel project with Root Directory set to the repository root, Framework Preset Vite, Build Command `npm run build`, and Output Directory `dist`.
+
+### Vercel project settings
+- Root Directory: repository root (`./`)
+- Framework Preset: Vite
+- Build Command: `npm run build`
+- Output Directory: `dist`
+- Install Command: `npm install --no-audit --no-fund`
+
+## Vercel deployment isolation
+Deploy this directory as its **own Vercel project**. Do not deploy it as a second root inside the Market Vercel project. Set Root Directory to `./`, Framework Preset to Vite, Build Command to `npm run build`, and Output Directory to `dist`. If a previously deployed URL still shows WyCode Market, open the Vercel deployment's **Source/Commit** and confirm it is this Admin repository; then redeploy this project. The HTML is configured with `Cache-Control: no-store` so stale HTML is not retained after a new deployment.
