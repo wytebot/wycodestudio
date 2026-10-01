@@ -4,7 +4,15 @@ import {auditProduct} from './audit.js';
 const clean=(v,n=500)=>String(v??'').trim().slice(0,n);
 const ADMIN_EMAIL='ilemobayotolulope11092003@gmail.com';
 const ids=()=>String(process.env.ADMIN_UIDS||'').split(',').map(x=>x.trim()).filter(Boolean);
-async function auth(req){try{getDb()}catch(e){throw Object.assign(new Error('Server Firebase credentials are not configured: '+(e.message||e)+'. Set FIREBASE_SERVICE_ACCOUNT_JSON in Vercel (wycoder project) and redeploy.'),{status:500})}const t=String(req.headers.authorization||'').replace(/^Bearer\s+/i,'').trim();if(!t)throw Object.assign(new Error('Admin sign-in is required.'),{status:401});let u;try{u=await admin.auth().verifyIdToken(t)}catch{throw Object.assign(new Error('Your admin session expired. Sign in again.'),{status:401})}if(u.firebase?.sign_in_provider!=='google.com')throw Object.assign(new Error('Use your Google account to access Admin.'),{status:403});if(String(u.email||'').toLowerCase()===ADMIN_EMAIL||ids().includes(u.uid))return u;if(!ids().length)throw Object.assign(new Error('Admin access is restricted to the configured administrator account.'),{status:403});throw Object.assign(new Error('This Google account is not authorized for marketplace administration.'),{status:403});}
+const normEmail=v=>String(v||'').trim().toLowerCase();
+async function auth(req){try{getDb()}catch(e){throw Object.assign(new Error('Server Firebase credentials are not configured: '+(e.message||e)+'. Set FIREBASE_SERVICE_ACCOUNT_JSON in Vercel (wycoder project) and redeploy.'),{status:500})}const t=String(req.headers.authorization||'').replace(/^Bearer\s+/i,'').trim();if(!t)throw Object.assign(new Error('Admin sign-in is required.'),{status:401});let u;try{u=await admin.auth().verifyIdToken(t)}catch{throw Object.assign(new Error('Your admin session expired. Sign in again.'),{status:401})}
+ const provider=String(u.firebase?.sign_in_provider||'');
+ if(provider!=='google.com')throw Object.assign(new Error('Use the Google account ilemobayotolulope11092003@gmail.com to access Admin.'),{status:403});
+ let canonicalEmail=normEmail(u.email);
+ try{const record=await admin.auth().getUser(u.uid);canonicalEmail=normEmail(record.email)||canonicalEmail;}catch{}
+ if(canonicalEmail===normEmail(ADMIN_EMAIL)||ids().includes(String(u.uid)))return {...u,email:canonicalEmail,adminEmail:ADMIN_EMAIL};
+ const shown=canonicalEmail||'unknown account';
+ throw Object.assign(new Error(`This Google account (${shown}) is not authorized. Sign out and sign in with ${ADMIN_EMAIL}.`),{status:403});}
 const iso=x=>{const o={...x};for(const k of Object.keys(o))if(o[k]?.toDate)o[k]=o[k].toDate().toISOString();return o;};
 function rank(p){const sales=Math.max(0,Number(p.sales)||0),rating=Math.max(0,Math.min(5,Number(p.sellerRatingAverage??p.ratingAverage)||0)),reviews=Math.min(100,Math.max(0,Number(p.ratingCount)||0)),fresh=Math.max(0,1-Math.min(Date.now()-(new Date(p.createdAt?.toDate?p.createdAt.toDate():p.createdAt||Date.now()).getTime()||Date.now()),1000*60*60*24*90)/(1000*60*60*24*90));return Math.round((Math.log1p(sales)*12+rating*7+reviews*.15+(p.special?18:0)+(p.suggested&&p.codeAudit?.status==='passed'?12:0)+(p.visibility?4:0)+fresh*5+(p.codeAudit?.status==='passed'?8:p.codeAudit?.status==='attention'?-3:0))*100)/100;}
 async function overview(db){
