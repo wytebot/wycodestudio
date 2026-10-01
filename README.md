@@ -46,3 +46,6 @@ The Admin screen now shows the real error with Retry / Sign out buttons instead 
 - `ADMIN_UIDS` missing or not containing your Firebase UID (the error message prints the UID to paste in).
 - `FIREBASE_SERVICE_ACCOUNT_JSON` missing or from a different Firebase project than `wycoder`.
 - `/api/*` not deployed (check Vercel function logs). After changing env vars, redeploy.
+
+## Administrator access
+The Admin backend accepts the verified Google account `ilemobayotolulope11092003@gmail.com` as the hard-coded administrator email fallback. `ADMIN_UIDS` remains supported as an additional allowlist.
