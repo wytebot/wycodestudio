@@ -9,7 +9,7 @@ Separate mobile-first administration app for WyCode Market. It uses the same Fir
 - Sellers: inspect seller status, account-level ratings, reports and balances.
 
 ## Security
-Set `ADMIN_UIDS` to the Firebase Auth UIDs allowed to use the Admin app. The backend rejects every other account. Do not rely on hiding the admin UI for security.
+The Admin UI/API is intentionally not protected by account authorization in this deployment. Protect the deployment separately (for example with Vercel access controls) if it must remain private.
 
 ## Gmail
 The appeal decision is added to `emailQueue`. `/api/email-worker` sends queued decisions through Gmail API. The worker intentionally batches pending mail so 50 pending decisions process as 15, 15, then 20 on successive cron runs.
@@ -39,7 +39,7 @@ Deploy this directory as its own Vercel project with Root Directory set to the r
 Deploy this directory as its **own Vercel project**. Do not deploy it as a second root inside the Market Vercel project. Set Root Directory to `./`, Framework Preset to Vite, Build Command to `npm run build`, and Output Directory to `dist`. If a previously deployed URL still shows WyCode Market, open the Vercel deployment's **Source/Commit** and confirm it is this Admin repository; then redeploy this project. The HTML is configured with `Cache-Control: no-store` so stale HTML is not retained after a new deployment.
 
 ## Authentication
-Admin access uses Google sign-in only. The backend also requires the Firebase token to have `google.com` as its sign-in provider and then checks `ADMIN_UIDS`.
+Admin access is intentionally open in this deployment; the Admin API does not require Firebase account authorization.
 
 ## Troubleshooting "Loading admin data…"
 The Admin screen now shows the real error with Retry / Sign out buttons instead of loading forever. Typical causes:
@@ -48,4 +48,4 @@ The Admin screen now shows the real error with Retry / Sign out buttons instead 
 - `/api/*` not deployed (check Vercel function logs). After changing env vars, redeploy.
 
 ## Administrator access
-The Admin backend accepts the verified Google account `ilemobayotolulope11092003@gmail.com` as the hard-coded administrator email fallback. `ADMIN_UIDS` remains supported as an additional allowlist.
+The previous hard-coded administrator email/UID authorization gate has been removed from the Admin UI/API.
