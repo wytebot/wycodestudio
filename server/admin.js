@@ -1,0 +1,64 @@
+import admin from 'firebase-admin';
+import {getDb,json,method,body} from './_lib.js';
+import {auditProduct} from './audit.js';
+const clean=(v,n=500)=>String(v??'').trim().slice(0,n);
+const ADMIN_ACTOR='Google admin session';
+const iso=x=>{const o={...x};for(const k of Object.keys(o))if(o[k]?.toDate)o[k]=o[k].toDate().toISOString();return o;};
+function rank(p){const sales=Math.max(0,Number(p.sales)||0),rating=Math.max(0,Math.min(5,Number(p.sellerRatingAverage??p.ratingAverage)||0)),reviews=Math.min(100,Math.max(0,Number(p.ratingCount)||0)),fresh=Math.max(0,1-Math.min(Date.now()-(new Date(p.createdAt?.toDate?p.createdAt.toDate():p.createdAt||Date.now()).getTime()||Date.now()),1000*60*60*24*90)/(1000*60*60*24*90));return Math.round((Math.log1p(sales)*12+rating*7+reviews*.15+(p.special?18:0)+(p.suggested&&p.codeAudit?.status==='passed'?12:0)+(p.visibility?4:0)+fresh*5+(p.codeAudit?.status==='passed'?8:p.codeAudit?.status==='attention'?-3:0))*100)/100;}
+async function overview(db){
+ const [ps,ss,as,rs,os]=await Promise.all([
+  db.collection('products').limit(1000).get(),
+  db.collection('sellers').limit(1000).get(),
+  db.collection('sellerAppeals').limit(500).get(),
+  db.collection('sellerReports').limit(1000).get(),
+  db.collection('orders').where('status','==','paid').limit(2000).get()
+ ]);
+ const sellerMap=new Map(ss.docs.map(d=>[d.id,d.data()||{}]));
+ const salesBy=new Map();
+ os.docs.forEach(d=>{const o=d.data()||{};if(o.productId)salesBy.set(o.productId,(salesBy.get(o.productId)||0)+1)});
+ const reportRows=rs.docs.map(d=>({id:d.id,...d.data()}));
+ const reportsBySeller=new Map();
+ for(const r of reportRows){const k=String(r.sellerUid||'');if(!k)continue;const a=reportsBySeller.get(k)||{count:0,reasons:{},latestAt:'',latestProductId:''};a.count++;const reason=String(r.reason||'Other');a.reasons[reason]=(a.reasons[reason]||0)+1;const when=String(r.createdAt?.toDate?r.createdAt.toDate().toISOString():r.createdAt||'');if(when>a.latestAt){a.latestAt=when;a.latestProductId=String(r.productId||'')}reportsBySeller.set(k,a)}
+ const products=ps.docs.map(d=>{
+   const x=d.data()||{},seller=sellerMap.get(String(x.sellerUid||''))||{};
+   const sellerRatingAverage=Number(seller.ratingAverage??x.sellerRatingAverage??x.ratingAverage??0);
+   const sellerRatingCount=Number(seller.ratingCount??x.sellerRatingCount??0);
+   const productReviewCount=Number(x.ratingCount||0);
+   const sales=Number(x.sales||salesBy.get(d.id)||0);
+   return iso({id:d.id,...x,sales,sellerName:x.sellerName||seller.displayName||'Developer',sellerRatingAverage,sellerRatingCount,ratingAverage:sellerRatingAverage,ratingCount:productReviewCount,productReviewCount,reportCount:Number(seller.reportCount||reportsBySeller.get(String(x.sellerUid||''))?.count||0),sellerBanned:Boolean(seller.banned),rankScore:rank({...x,sales,sellerRatingAverage,ratingCount:productReviewCount}),special:Boolean(x.special||x.saleType==='special')});
+ });
+ products.sort((a,b)=>Number(b.rankScore||0)-Number(a.rankScore||0));
+ const sellers=ss.docs.map(d=>{
+   const x=d.data()||{},r=reportsBySeller.get(d.id)||{count:0,reasons:{},latestAt:'',latestProductId:''};
+   return iso({uid:d.id,...x,ratingAverage:Number(x.ratingAverage||0),ratingCount:Number(x.ratingCount||0),reportCount:Number(x.reportCount||r.count||0),reportReasons:r.reasons,banned:Boolean(x.banned),reportProgress:Math.min(50,Number(x.reportCount||r.count||0))});
+ });
+ const reports=reportRows.map(r=>{const s=sellerMap.get(String(r.sellerUid||''))||{};return iso({...r,sellerName:s.displayName||'Developer',sellerReportCount:Number(s.reportCount||reportsBySeller.get(String(r.sellerUid||''))?.count||0),sellerBanned:Boolean(s.banned)});});
+ const reportAccounts=sellers.filter(s=>Number(s.reportCount||0)>0).sort((a,b)=>Number(b.reportCount||0)-Number(a.reportCount||0));
+ return{products,sellers,appeals:as.docs.map(d=>iso({id:d.id,...d.data()})),reports,reportAccounts,reportCount:reportRows.length,bannedCount:ss.docs.filter(d=>d.data()?.banned).length,totalSales:os.size};
+}
+async function special(db,b){const id=clean(b.productId,120);if(!id)throw Object.assign(new Error('Product is required.'),{status:400});const r=db.collection('products').doc(id),s=await r.get();if(!s.exists)throw Object.assign(new Error('Product not found.'),{status:404});const p=s.data()||{};const sellerSnap=await db.collection('sellers').doc(String(p.sellerUid||'')).get(),seller=sellerSnap.data()||{};if(Boolean(seller.banned)||p.banned===true || p.sellerBanned===true)throw Object.assign(new Error('Banned seller products cannot be promoted.'),{status:403});
+ if(!['published','active','hidden'].includes(String(p.status||'')))throw Object.assign(new Error('Only listed products can be marked Special Sales.'),{status:409});const on=!Boolean(p.special);await r.set({special:on,saleType:on?'special':'normal',updatedAt:admin.firestore.FieldValue.serverTimestamp()},{merge:true});return{ok:true,special:on};}
+async function suggest(db,b,adminUid){
+ const id=clean(b.productId,120);if(!id)throw Object.assign(new Error('Product is required.'),{status:400});
+ const ref=db.collection('products').doc(id),snap=await ref.get();if(!snap.exists)throw Object.assign(new Error('Product not found.'),{status:404});
+ const p=snap.data()||{};
+ const sellerSnap=await db.collection('sellers').doc(String(p.sellerUid||'')).get(),seller=sellerSnap.data()||{};
+ if(Boolean(seller.banned)||p.banned===true || p.sellerBanned===true)throw Object.assign(new Error('Banned seller products cannot be suggested.'),{status:403});
+ if(!['published','active','hidden'].includes(String(p.status||'')))throw Object.assign(new Error('Only listed products can be suggested.'),{status:409});
+ if(p.suggested===true){await ref.set({suggested:false,suggestedRemovedAt:admin.firestore.FieldValue.serverTimestamp(),updatedAt:admin.firestore.FieldValue.serverTimestamp()},{merge:true});return {ok:true,suggested:false,audit:p.codeAudit||null};}
+ const audit=await auditProduct(id);
+ if(audit.status!=='passed')return {ok:false,suggested:false,audit,message:'Product must pass the syntax audit before it can be suggested.'};
+ await ref.set({suggested:true,suggestedApprovedBy:adminUid,suggestedApprovedAt:admin.firestore.FieldValue.serverTimestamp(),updatedAt:admin.firestore.FieldValue.serverTimestamp()},{merge:true});
+ return {ok:true,suggested:true,audit};
+}
+async function decide(db,b,adminUid){const id=clean(b.appealId,120),decision=clean(b.decision,20).toLowerCase(),note=clean(b.note,1000);if(!id||!['approve','reject'].includes(decision))throw Object.assign(new Error('Choose a valid appeal decision.'),{status:400});const ar=db.collection('sellerAppeals').doc(id);let uid='',email='',name='';await db.runTransaction(async tx=>{const s=await tx.get(ar);if(!s.exists)throw Object.assign(new Error('Appeal not found.'),{status:404});const a=s.data()||{};if(a.status!=='pending')throw Object.assign(new Error('This appeal has already been decided.'),{status:409});uid=a.uid;email=a.email;name=a.accountName;tx.set(ar,{status:decision==='approve'?'approved':'rejected',decisionBy:adminUid,decisionNote:note,decidedAt:admin.firestore.FieldValue.serverTimestamp(),updatedAt:admin.firestore.FieldValue.serverTimestamp()},{merge:true})});if(decision==='approve'){await db.collection('sellers').doc(uid).set({banned:false,banAppealApprovedAt:admin.firestore.FieldValue.serverTimestamp(),updatedAt:admin.firestore.FieldValue.serverTimestamp()},{merge:true});const s=await db.collection('products').where('sellerUid','==',uid).get(),batch=db.batch();s.docs.forEach(d=>{const p=d.data()||{};if(p.status==='banned')batch.set(d.ref,{status:p.preBanStatus||'published',updatedAt:admin.firestore.FieldValue.serverTimestamp()},{merge:true})});if(!s.empty)await batch.commit()}await db.collection('emailQueue').add({type:'appeal-decision',to:email,accountName:name,decision,note,status:'pending',createdAt:admin.firestore.FieldValue.serverTimestamp()});try{const t=(await db.collection('notificationSubscribers').where('uid','==',uid).limit(500).get()).docs.map(d=>String(d.data()?.token||'')).filter(Boolean);if(t.length)await admin.messaging().sendEachForMulticast({tokens:t,data:{title:decision==='approve'?'Appeal approved 🎉':'Appeal decision',body:decision==='approve'?`Congratulations, ${name}. Your WyCode Market appeal has been approved.`:'Your WyCode Market appeal was rejected. Your account remains banned.',url:'/?studio=appeal'}})}catch{}return{ok:true,status:decision==='approve'?'approved':'rejected'};}
+async function smartSearch(db,b){
+ const q=clean(b.q,300).toLowerCase(),tokens=q.split(/[^a-z0-9]+/).filter(x=>x.length>1).slice(0,30);
+ if(!tokens.length)return{keywords:[],products:[]};
+ const [snap,ss]=await Promise.all([db.collection('products').limit(1000).get(),db.collection('sellers').limit(1000).get()]);
+ const sellerMap=new Map(ss.docs.map(d=>[d.id,d.data()||{}]));
+ const rows=snap.docs.map(d=>{const p=d.data()||{},seller=sellerMap.get(String(p.sellerUid||''))||{},hay=`${p.name||''} ${p.description||''} ${p.category||''} ${p.features||''} ${p.requirements||''}`.toLowerCase();let score=0;for(const t of tokens){if(String(p.name||'').toLowerCase().includes(t))score+=8;if(String(p.category||'').toLowerCase().includes(t))score+=6;if(hay.includes(t))score+=2}const sellerRatingAverage=Number(seller.ratingAverage??p.sellerRatingAverage??p.ratingAverage??0),productReviewCount=Number(p.ratingCount||0),sales=Number(p.sales||0);return {...p,id:d.id,searchScore:score+sellerRatingAverage*2+Math.log1p(sales),sellerRatingAverage,sellerRatingCount:Number(seller.ratingCount??p.sellerRatingCount??0),productReviewCount,sellerBanned:Boolean(seller.banned)};}).filter(x=>['published','active','hidden','banned'].includes(x.status)&&x.searchScore>0).sort((a,b)=>b.searchScore-a.searchScore).slice(0,100).map(x=>iso({id:x.id,name:x.name,category:x.category,sellerName:x.sellerName||sellerMap.get(String(x.sellerUid||''))?.displayName||'Developer',sales:Number(x.sales||0),sellerRatingAverage:x.sellerRatingAverage,sellerRatingCount:x.sellerRatingCount,ratingAverage:x.sellerRatingAverage,ratingCount:x.productReviewCount,productReviewCount:x.productReviewCount,rankScore:rank({...x,sellerRatingAverage:x.sellerRatingAverage,ratingCount:x.productReviewCount}),audit:x.codeAudit||null,status:x.status,sellerUid:x.sellerUid,sellerBanned:x.sellerBanned,suggested:Boolean(x.suggested===true&&x.codeAudit?.status==='passed')}));
+ return{keywords:tokens,products:rows};
+}
+async function alertSeller(db,b){const id=clean(b.productId,120);const s=await db.collection('products').doc(id).get();if(!s.exists)throw Object.assign(new Error('Product not found.'),{status:404});const p=s.data()||{},tokens=(await db.collection('notificationSubscribers').where('uid','==',String(p.sellerUid)).limit(500).get()).docs.map(d=>String(d.data()?.token||'')).filter(Boolean);if(!tokens.length)return{ok:true,sent:0,message:'Seller has no enabled notification devices.'};const r=await admin.messaging().sendEachForMulticast({tokens,data:{title:'Product audit alert',body:`${p.name||'Your product'} might need attention. Check the syntax audit in WyCode Studio.`,url:`/?studio=audit&product=${encodeURIComponent(id)}`}});return{ok:true,sent:r.successCount};}
+export default async function handler(req,res){if(!method(req,res,['POST']))return;try{const b=await body(req),db=getDb();if(b.action==='overview')return json(res,200,await overview(db));if(b.action==='toggle-special')return json(res,200,await special(db,b));if(b.action==='toggle-suggest')return json(res,200,await suggest(db,b,ADMIN_ACTOR));if(b.action==='decide-appeal')return json(res,200,await decide(db,b,ADMIN_ACTOR));if(b.action==='smart-search')return json(res,200,await smartSearch(db,b));if(b.action==='audit-product'){const id=clean(b.productId,120),p=await db.collection('products').doc(id).get();if(!p.exists)return json(res,404,{error:'Product not found.'});return json(res,200,{ok:true,audit:await auditProduct(id)});}if(b.action==='alert-seller')return json(res,200,await alertSeller(db,b));return json(res,400,{error:'Unknown admin action.'});}catch(e){return json(res,e.status&&e.status<500?e.status:500,{error:e.message||'Admin request failed.'});}}
