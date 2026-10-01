@@ -9,7 +9,7 @@ Separate mobile-first administration app for WyCode Market. It uses the same Fir
 - Sellers: inspect seller status, account-level ratings, reports and balances.
 
 ## Security
-The Admin UI/API is intentionally not protected by account authorization in this deployment. Protect the deployment separately (for example with Vercel access controls) if it must remain private.
+The Admin UI uses a normal Google sign-in for the operator experience. The marketplace API itself does not perform an admin-email/UID authorization gate; protect the deployment separately if the control center must be private.
 
 ## Gmail
 The appeal decision is added to `emailQueue`. `/api/email-worker` sends queued decisions through Gmail API. The worker intentionally batches pending mail so 50 pending decisions process as 15, 15, then 20 on successive cron runs.
@@ -18,7 +18,7 @@ Required variables are in `.env.example`.
 
 
 ## Current marketplace flow
-- Admin uses Google sign-in plus the server-side `ADMIN_UIDS` allowlist.
+- Admin uses normal Google sign-in for the operator UI; there is no server-side admin-email/UID authorization gate.
 - Only a verified buyer of the exact product can submit one review per product and one seller report per seller account. A buyer can edit that existing review but cannot create a second review for the same product.
 - Seller star rating is account-level and is shown across that seller's products. Product `ratingCount` is the number of reviews for that individual product.
 - Seller reports are account-level. Each buyer can report a seller once; the 50th unique buyer report bans the seller account and the seller's listed products.
@@ -39,13 +39,12 @@ Deploy this directory as its own Vercel project with Root Directory set to the r
 Deploy this directory as its **own Vercel project**. Do not deploy it as a second root inside the Market Vercel project. Set Root Directory to `./`, Framework Preset to Vite, Build Command to `npm run build`, and Output Directory to `dist`. If a previously deployed URL still shows WyCode Market, open the Vercel deployment's **Source/Commit** and confirm it is this Admin repository; then redeploy this project. The HTML is configured with `Cache-Control: no-store` so stale HTML is not retained after a new deployment.
 
 ## Authentication
-Admin access is intentionally open in this deployment; the Admin API does not require Firebase account authorization.
+The Admin API does not require a Firebase admin authorization token; the UI uses normal Google sign-in.
 
 ## Troubleshooting "Loading admin data…"
 The Admin screen now shows the real error with Retry / Sign out buttons instead of loading forever. Typical causes:
-- `ADMIN_UIDS` missing or not containing your Firebase UID (the error message prints the UID to paste in).
 - `FIREBASE_SERVICE_ACCOUNT_JSON` missing or from a different Firebase project than `wycoder`.
 - `/api/*` not deployed (check Vercel function logs). After changing env vars, redeploy.
 
 ## Administrator access
-The previous hard-coded administrator email/UID authorization gate has been removed from the Admin UI/API.
+The previous hard-coded administrator email/UID authorization gate has been removed from the Admin UI/API and from the product-audit endpoint.

@@ -2,10 +2,7 @@ import admin from 'firebase-admin';
 import {getDb,json,method,body} from './_lib.js';
 import {auditProduct} from './audit.js';
 const clean=(v,n=500)=>String(v??'').trim().slice(0,n);
-const ADMIN_EMAIL='ilemobayotolulope11092003@gmail.com';
-const ids=()=>String(process.env.ADMIN_UIDS||'').split(',').map(x=>x.trim()).filter(Boolean);
-const normEmail=v=>String(v||'').trim().toLowerCase();
-const ADMIN_ACTOR='ilemobayotolulope11092003@gmail.com';
+const ADMIN_ACTOR='Google admin session';
 const iso=x=>{const o={...x};for(const k of Object.keys(o))if(o[k]?.toDate)o[k]=o[k].toDate().toISOString();return o;};
 function rank(p){const sales=Math.max(0,Number(p.sales)||0),rating=Math.max(0,Math.min(5,Number(p.sellerRatingAverage??p.ratingAverage)||0)),reviews=Math.min(100,Math.max(0,Number(p.ratingCount)||0)),fresh=Math.max(0,1-Math.min(Date.now()-(new Date(p.createdAt?.toDate?p.createdAt.toDate():p.createdAt||Date.now()).getTime()||Date.now()),1000*60*60*24*90)/(1000*60*60*24*90));return Math.round((Math.log1p(sales)*12+rating*7+reviews*.15+(p.special?18:0)+(p.suggested&&p.codeAudit?.status==='passed'?12:0)+(p.visibility?4:0)+fresh*5+(p.codeAudit?.status==='passed'?8:p.codeAudit?.status==='attention'?-3:0))*100)/100;}
 async function overview(db){
