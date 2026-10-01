@@ -40,3 +40,9 @@ Deploy this directory as its **own Vercel project**. Do not deploy it as a secon
 
 ## Authentication
 Admin access uses Google sign-in only. The backend also requires the Firebase token to have `google.com` as its sign-in provider and then checks `ADMIN_UIDS`.
+
+## Troubleshooting "Loading admin data…"
+The Admin screen now shows the real error with Retry / Sign out buttons instead of loading forever. Typical causes:
+- `ADMIN_UIDS` missing or not containing your Firebase UID (the error message prints the UID to paste in).
+- `FIREBASE_SERVICE_ACCOUNT_JSON` missing or from a different Firebase project than `wycoder`.
+- `/api/*` not deployed (check Vercel function logs). After changing env vars, redeploy.
