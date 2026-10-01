@@ -8,7 +8,7 @@
   },
   "scripts": {
     "dev": "vite",
-    "build": "npm install --no-audit --no-fund && vite build",
+    "build": "vite build",
     "preview": "vite preview"
   },
   "dependencies": {

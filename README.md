@@ -3,10 +3,10 @@
 Separate mobile-first administration app for WyCode Market. It uses the same Firebase project and Firestore database as the Market app.
 
 ## Pages
-- Sellers Lab: published/listed products with sales, star rating and an admin-only Special Sales toggle.
+- Sellers Lab: all listed products with sales, account-level seller star ratings, product-level review counts, syntax audits, Suggested, and an admin-only Special Sales toggle.
 - Appeals: approve/reject one-time seller appeals.
-- Reports: inspect report volume and reasons.
-- Sellers: inspect seller status, reports and balances.
+- Reports: inspect seller-account report totals/reasons; reports accumulate per seller account and 50 unique buyer reports trigger the ban flow.
+- Sellers: inspect seller status, account-level ratings, reports and balances.
 
 ## Security
 Set `ADMIN_UIDS` to the Firebase Auth UIDs allowed to use the Admin app. The backend rejects every other account. Do not rely on hiding the admin UI for security.
@@ -17,12 +17,12 @@ The appeal decision is added to `emailQueue`. `/api/email-worker` sends queued d
 Required variables are in `.env.example`.
 
 
-## Hardened marketplace flow
-- Buyers use Firebase Anonymous Auth; completed orders are bound to the anonymous UID.
-- Checkout, payment verification, authorization and download require that buyer UID.
-- Only a verified buyer of the exact product can submit one review per product and one seller report per seller.
-- Seller balances are credited only after server-side Flutterwave verification.
-- Automatic seller payouts release USD balance in $50 thresholds when valid bank details exist; provider status is recorded as submitted/pending/failed.
+## Current marketplace flow
+- Admin uses Google sign-in plus the server-side `ADMIN_UIDS` allowlist.
+- Only a verified buyer of the exact product can submit one review per product and one seller report per seller account. A buyer can edit that existing review but cannot create a second review for the same product.
+- Seller star rating is account-level and is shown across that seller's products. Product `ratingCount` is the number of reviews for that individual product.
+- Seller reports are account-level. Each buyer can report a seller once; the 50th unique buyer report bans the seller account and the seller's listed products.
+- Payment verification and Flutterwave processing are centralized in Wytelab; this Admin app does not require Flutterwave credentials. Seller balances shown here are marketplace ledger data.
 - Seller source archives remain in seller-controlled Google Drive. Static code audits read the ZIP and store only audit metadata/errors.
 
 ## Vercel deployment
