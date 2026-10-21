@@ -23,6 +23,29 @@ import android.os.Handler;
 import android.os.Message;
 import android.os.Environment;
 import android.os.Vibrator;
+import android.app.AlarmManager;
+import android.content.ClipData;
+import android.content.ClipboardManager;
+import android.content.ContentValues;
+import android.content.pm.ActivityInfo;
+import android.content.pm.ShortcutInfo;
+import android.content.pm.ShortcutManager;
+import android.content.res.Configuration;
+import android.graphics.drawable.Icon;
+import android.net.ConnectivityManager;
+import android.net.Network;
+import android.net.NetworkCapabilities;
+import android.net.NetworkInfo;
+import android.os.CancellationSignal;
+import android.provider.CalendarContract;
+import android.provider.ContactsContract;
+import android.provider.MediaStore;
+import android.provider.Settings;
+import android.speech.RecognizerIntent;
+import android.speech.tts.TextToSpeech;
+import android.util.Base64;
+import android.view.HapticFeedbackConstants;
+import java.util.Locale;
 import android.text.TextUtils;
 import android.view.View;
 import android.view.ViewGroup;
@@ -80,6 +103,9 @@ public class WyBuildActivity extends Activity {
     private static final int REQ_NOTIF = 7003;
     private static final int REQ_GEO = 7004;
     private static final int REQ_STORAGE = 7005;
+    private static final int REQ_CONTACT = 7010;
+    private static final int REQ_SPEECH = 7011;
+    private static final int REQ_REMIND_PERM = 7012;
     private static final String CHANNEL = "wybuild_default";
 
     private static final class Rule {
@@ -160,10 +186,14 @@ public class WyBuildActivity extends Activity {
             web.resumeTimers();
         }
         applySystemBars();
+        startNetworkWatch();
+        emit("lifecycle", obj("state", "resume"));
     }
 
     @Override
     protected void onPause() {
+        emit("lifecycle", obj("state", "pause"));
+        stopNetworkWatch();
         if (web != null) {
             web.onPause();
             CookieManager.getInstance().flush();
@@ -174,6 +204,10 @@ public class WyBuildActivity extends Activity {
     @Override
     protected void onDestroy() {
         uninstallBackHandling();
+        if (tts != null) {
+            try { tts.stop(); tts.shutdown(); } catch (Exception ignored) { /* ignore */ }
+            tts = null;
+        }
         if (web != null) {
             root.removeView(web);
             web.stopLoading();
@@ -214,6 +248,8 @@ public class WyBuildActivity extends Activity {
             fullscreen = c.optBoolean("fullscreen", false);
             stickyFullscreen = "fullscreen-sticky".equals(c.optString("display", ""));
             notifications = c.optBoolean("notifications", false);
+            JSONArray nfa = c.optJSONArray("nativeFeatures");
+            if (nfa != null) for (int i = 0; i < nfa.length(); i++) nf.add(nfa.optString(i));
             themeColor = color(c.optString("themeColor"), Color.WHITE);
             backgroundColor = color(c.optString("backgroundColor"), Color.WHITE);
             navColor = color(c.optString("navigationColor"), themeColor);
@@ -420,6 +456,16 @@ public class WyBuildActivity extends Activity {
 
     private void handleIntent(Intent intent) {
         String target = null;
+        if (intent != null && Intent.ACTION_SEND.equals(intent.getAction()) && nf.contains("sharetarget")) {
+            String text = intent.getStringExtra(Intent.EXTRA_TEXT);
+            String title = intent.getStringExtra(Intent.EXTRA_SUBJECT);
+            if (text != null && !text.isEmpty()) {
+                pendingShare = obj("text", text.length() > 50000 ? text.substring(0, 50000) : text,
+                        "title", title == null ? "" : (title.length() > 500 ? title.substring(0, 500) : title),
+                        "at", System.currentTimeMillis());
+                if (web.getUrl() != null) deliverPendingShare();
+            }
+        }
         if (intent != null) {
             String extra = intent.getStringExtra("wybuild_url");
             Uri data = intent.getData();
@@ -549,9 +595,22 @@ public class WyBuildActivity extends Activity {
         }
 
         @Override
+        public void onPageStarted(WebView view, String url, Bitmap favicon) {
+            pageUrl = url == null ? "" : url;
+        }
+
+        @Override
         public void onPageFinished(WebView view, String url) {
             shown = true;
+            pageUrl = url == null ? "" : url;
             CookieManager.getInstance().flush();
+
+            // Improve vertical/horizontal scrolling in the standalone native WebView without
+            // cancelling touch events or changing page-specific gesture handlers.
+            try {
+                view.evaluateJavascript("(function(){try{if(document.getElementById('wybuild-scroll-quality'))return;var s=document.createElement('style');s.id='wybuild-scroll-quality';s.textContent='html{scroll-behavior:smooth;-webkit-overflow-scrolling:touch;overscroll-behavior-x:contain}body{-webkit-overflow-scrolling:touch;overscroll-behavior-x:contain}[data-scroll-x],.wy-scroll-x{overflow-x:auto;-webkit-overflow-scrolling:touch;overscroll-behavior-x:contain;touch-action:pan-x pan-y;scrollbar-width:thin}[data-scroll-y],.wy-scroll-y{overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior-y:contain;touch-action:pan-y;scrollbar-width:thin}pre,table{max-width:100%}@media(prefers-reduced-motion:reduce){html{scroll-behavior:auto}*,*::before,*::after{scroll-behavior:auto!important}}';(document.head||document.documentElement).appendChild(s)}catch(e){}})();", null);
+            } catch (Exception ignored) { /* scroll polish is non-critical */ }
+            deliverPendingShare();
         }
 
         @Override
@@ -813,6 +872,18 @@ public class WyBuildActivity extends Activity {
 
     @Override
     protected void onActivityResult(int code, int result, Intent data) {
+        if (code == REQ_CONTACT) {
+            String rid = pendingContactId;
+            pendingContactId = "";
+            handleContactResult(rid, result, data);
+            return;
+        }
+        if (code == REQ_SPEECH) {
+            String rid = pendingSpeechId;
+            pendingSpeechId = "";
+            handleSpeechResult(rid, result, data);
+            return;
+        }
         if (code == REQ_FILE && fileCallback != null) {
             fileCallback.onReceiveValue(WebChromeClient.FileChooserParams.parseResult(result, data));
             fileCallback = null;
@@ -880,6 +951,446 @@ public class WyBuildActivity extends Activity {
         nm.notify(id, b.build());
     }
 
+
+    // ------------------------------------------------------------------ native feature plumbing
+    // Always included in every standalone build: they need no permission and no manifest entry.
+    private static final String[] BASE_FEATURES = {"clipboard", "haptics", "keepawake", "deviceinfo", "orientation", "lifecycle",
+            "calendar", "contacts", "rate", "securescreen", "savefile", "shortcuts", "speech"};
+    private final Set<String> nf = new HashSet<>();      // base + opt-in feature ids written by twa-native.py
+    private volatile String pageUrl = "";
+    private JSONObject pendingShare;
+    private TextToSpeech tts;
+    private boolean ttsReady;
+    private String ttsQueued, ttsQueuedLang;
+    private Object netCallback;
+    private String pendingContactId = "", pendingSpeechId = "";
+
+    private boolean has(String id) {
+        return nf.contains(id);
+    }
+
+    /** The bridge only answers pages served from the app's own hosts (never a sign-in page or an embedded third party). */
+    private boolean trusted() {
+        try {
+            Uri u = Uri.parse(pageUrl);
+            return "https".equalsIgnoreCase(u.getScheme()) && own.contains(norm(u.getHost()));
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private static String capId(String id) {
+        if (id == null) return "";
+        return id.length() > 64 ? id.substring(0, 64) : id;
+    }
+
+    private static JSONObject obj(Object... kv) {
+        JSONObject o = new JSONObject();
+        try {
+            for (int i = 0; i + 1 < kv.length; i += 2) o.put(String.valueOf(kv[i]), kv[i + 1]);
+        } catch (Exception ignored) {
+            // ignore
+        }
+        return o;
+    }
+
+    /** Sends a native event to the page as window event "wybuild:<event>" (constant names only). */
+    private void emit(final String event, final JSONObject detail) {
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                if (web == null || !trusted()) return;
+                web.evaluateJavascript("window.dispatchEvent(new CustomEvent('wybuild:" + event + "',{detail:" + detail.toString() + "}))", null);
+            }
+        });
+    }
+
+    private void result(String id, boolean ok, String error, Object... kv) {
+        JSONObject o = obj(kv);
+        try {
+            o.put("id", id);
+            o.put("ok", ok);
+            if (error != null) o.put("error", error);
+        } catch (Exception ignored) {
+            // ignore
+        }
+        emit("result", o);
+    }
+
+    private void deliverPendingShare() {
+        if (pendingShare != null && web != null) emit("share", pendingShare);
+    }
+
+    private boolean isOnline() {
+        try {
+            ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+            if (cm == null) return true;
+            if (Build.VERSION.SDK_INT >= 23) {
+                Network n = cm.getActiveNetwork();
+                NetworkCapabilities c = n == null ? null : cm.getNetworkCapabilities(n);
+                return c != null && c.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET);
+            }
+            NetworkInfo ni = cm.getActiveNetworkInfo();
+            return ni != null && ni.isConnected();
+        } catch (Exception e) {
+            return true;
+        }
+    }
+
+    private void startNetworkWatch() {
+        if (Build.VERSION.SDK_INT < 24 || netCallback != null) return;
+        try {
+            ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+            if (cm == null) return;
+            ConnectivityManager.NetworkCallback cb = new ConnectivityManager.NetworkCallback() {
+                @Override
+                public void onAvailable(Network n) { emit("network", obj("online", true)); }
+
+                @Override
+                public void onLost(Network n) { emit("network", obj("online", false)); }
+            };
+            cm.registerDefaultNetworkCallback(cb);
+            netCallback = cb;
+        } catch (Exception ignored) {
+            // ACCESS_NETWORK_STATE missing or service unavailable: the page can still poll deviceInfo().online
+        }
+    }
+
+    private void stopNetworkWatch() {
+        if (netCallback == null) return;
+        try {
+            ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+            if (cm != null) cm.unregisterNetworkCallback((ConnectivityManager.NetworkCallback) netCallback);
+        } catch (Exception ignored) {
+            // ignore
+        }
+        netCallback = null;
+    }
+
+    private JSONObject deviceInfoJson() {
+        boolean dark = (getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES;
+        return obj("platform", "android", "sdk", Build.VERSION.SDK_INT, "model", Build.MODEL, "manufacturer", Build.MANUFACTURER,
+                "locale", Locale.getDefault().toLanguageTag(), "appVersion", versionName, "package", getPackageName(),
+                "online", isOnline(), "darkMode", dark);
+    }
+
+    private void hapticNow(String kind) {
+        if (web == null) return;
+        int c = HapticFeedbackConstants.VIRTUAL_KEY;
+        if ("tick".equals(kind)) c = HapticFeedbackConstants.CLOCK_TICK;
+        else if ("heavy".equals(kind)) c = HapticFeedbackConstants.LONG_PRESS;
+        else if ("success".equals(kind)) c = Build.VERSION.SDK_INT >= 30 ? HapticFeedbackConstants.CONFIRM : HapticFeedbackConstants.VIRTUAL_KEY;
+        else if ("error".equals(kind)) c = Build.VERSION.SDK_INT >= 30 ? HapticFeedbackConstants.REJECT : HapticFeedbackConstants.LONG_PRESS;
+        web.performHapticFeedback(c);
+    }
+
+    private void copyNow(String text) {
+        ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+        if (cm != null) cm.setPrimaryClip(ClipData.newPlainText(appName, text));
+    }
+
+    private void readClipboard(String id) {
+        try {
+            ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+            ClipData d = cm == null ? null : cm.getPrimaryClip();
+            String t = d != null && d.getItemCount() > 0 ? String.valueOf(d.getItemAt(0).coerceToText(this)) : "";
+            result(id, true, null, "text", t.length() > 200000 ? t.substring(0, 200000) : t);
+        } catch (Exception e) {
+            result(id, false, "failed");
+        }
+    }
+
+    private void openRate() {
+        String pkg = getPackageName();
+        try {
+            Intent i = new Intent(Intent.ACTION_VIEW, Uri.parse("market://details?id=" + pkg));
+            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            startActivity(i);
+        } catch (Exception e) {
+            openInBrowser(Uri.parse("https://play.google.com/store/apps/details?id=" + pkg));
+        }
+    }
+
+    // ---- biometric unlock (platform BiometricPrompt, no extra libraries)
+    private String biometricStatus() {
+        if (!has("biometric") || Build.VERSION.SDK_INT < 29) return "unsupported";
+        try {
+            android.hardware.biometrics.BiometricManager bm = (android.hardware.biometrics.BiometricManager) getSystemService(Context.BIOMETRIC_SERVICE);
+            if (bm == null) return "unsupported";
+            int r = Build.VERSION.SDK_INT >= 30
+                    ? bm.canAuthenticate(android.hardware.biometrics.BiometricManager.Authenticators.BIOMETRIC_STRONG
+                            | android.hardware.biometrics.BiometricManager.Authenticators.DEVICE_CREDENTIAL)
+                    : bm.canAuthenticate();
+            if (r == android.hardware.biometrics.BiometricManager.BIOMETRIC_SUCCESS) return "available";
+            if (r == android.hardware.biometrics.BiometricManager.BIOMETRIC_ERROR_NONE_ENROLLED) return "unenrolled";
+            return "unsupported";
+        } catch (Exception e) {
+            return "unsupported";
+        }
+    }
+
+    private void biometricAuth(final String id, String title, String subtitle) {
+        if (!"available".equals(biometricStatus())) {
+            result(id, false, "unavailable");
+            return;
+        }
+        try {
+            android.hardware.biometrics.BiometricPrompt.Builder b = new android.hardware.biometrics.BiometricPrompt.Builder(this)
+                    .setTitle(title == null || title.isEmpty() ? appName : title);
+            if (subtitle != null && !subtitle.isEmpty()) b.setSubtitle(subtitle);
+            if (Build.VERSION.SDK_INT >= 30) {
+                b.setAllowedAuthenticators(android.hardware.biometrics.BiometricManager.Authenticators.BIOMETRIC_STRONG
+                        | android.hardware.biometrics.BiometricManager.Authenticators.DEVICE_CREDENTIAL);
+            } else {
+                b.setNegativeButton(getString(android.R.string.cancel), getMainExecutor(), new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface d, int w) { result(id, false, "cancelled"); }
+                });
+            }
+            b.build().authenticate(new CancellationSignal(), getMainExecutor(), new android.hardware.biometrics.BiometricPrompt.AuthenticationCallback() {
+                @Override
+                public void onAuthenticationSucceeded(android.hardware.biometrics.BiometricPrompt.AuthenticationResult r) {
+                    result(id, true, null);
+                }
+
+                @Override
+                public void onAuthenticationError(int code, CharSequence msg) {
+                    result(id, false, code == 10 || code == 13 ? "cancelled" : "error");
+                }
+            });
+        } catch (Exception e) {
+            result(id, false, "error");
+        }
+    }
+
+    // ---- speech: recognition through the system recogniser, speaking through TextToSpeech
+    private void startListening(String id, String lang) {
+        try {
+            Intent i = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
+            i.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
+            if (lang != null && !lang.isEmpty()) i.putExtra(RecognizerIntent.EXTRA_LANGUAGE, lang);
+            i.putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3);
+            pendingSpeechId = id;
+            startActivityForResult(i, REQ_SPEECH);
+        } catch (Exception e) {
+            pendingSpeechId = "";
+            result(id, false, "unavailable");
+        }
+    }
+
+    private void handleSpeechResult(String id, int result, Intent data) {
+        ArrayList<String> r = data == null ? null : data.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS);
+        if (result != RESULT_OK || r == null || r.isEmpty()) {
+            result(id, false, "cancelled");
+            return;
+        }
+        JSONArray alts = new JSONArray();
+        for (String t : r) alts.put(t);
+        result(id, true, null, "text", r.get(0), "alternatives", alts);
+    }
+
+    private void speakNow(final String text, final String lang) {
+        if (tts == null) {
+            ttsQueued = text;
+            ttsQueuedLang = lang;
+            tts = new TextToSpeech(this, new TextToSpeech.OnInitListener() {
+                @Override
+                public void onInit(int status) {
+                    ttsReady = status == TextToSpeech.SUCCESS;
+                    if (ttsReady && ttsQueued != null) {
+                        String q = ttsQueued, l = ttsQueuedLang;
+                        ttsQueued = null;
+                        speakNow(q, l);
+                    }
+                }
+            });
+            return;
+        }
+        if (!ttsReady) {
+            ttsQueued = text;
+            ttsQueuedLang = lang;
+            return;
+        }
+        try {
+            if (lang != null && !lang.isEmpty()) tts.setLanguage(Locale.forLanguageTag(lang));
+        } catch (Exception ignored) {
+            // keep the engine's current language
+        }
+        tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, "wybuild");
+    }
+
+    // ---- one-shot contact picker: the system picker returns ONLY the contact the user taps, so no READ_CONTACTS permission
+    private void pickContact(String id) {
+        try {
+            pendingContactId = id;
+            startActivityForResult(new Intent(Intent.ACTION_PICK, ContactsContract.CommonDataKinds.Phone.CONTENT_URI), REQ_CONTACT);
+        } catch (Exception e) {
+            pendingContactId = "";
+            result(id, false, "unavailable");
+        }
+    }
+
+    private void handleContactResult(String id, int result, Intent data) {
+        if (result != RESULT_OK || data == null || data.getData() == null) {
+            result(id, false, "cancelled");
+            return;
+        }
+        android.database.Cursor c = null;
+        try {
+            c = getContentResolver().query(data.getData(), new String[]{
+                    ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME, ContactsContract.CommonDataKinds.Phone.NUMBER}, null, null, null);
+            if (c != null && c.moveToFirst()) result(id, true, null, "name", c.getString(0), "phone", c.getString(1));
+            else result(id, false, "empty");
+        } catch (Exception e) {
+            result(id, false, "failed");
+        } finally {
+            if (c != null) c.close();
+        }
+    }
+
+    private void addCalendarEvent(String title, String description, String location, long start, long end) {
+        try {
+            Intent i = new Intent(Intent.ACTION_INSERT).setData(CalendarContract.Events.CONTENT_URI)
+                    .putExtra(CalendarContract.Events.TITLE, title)
+                    .putExtra(CalendarContract.Events.DESCRIPTION, description)
+                    .putExtra(CalendarContract.Events.EVENT_LOCATION, location)
+                    .putExtra(CalendarContract.EXTRA_EVENT_BEGIN_TIME, start)
+                    .putExtra(CalendarContract.EXTRA_EVENT_END_TIME, end > start ? end : start + 3600000L);
+            startActivity(i);
+        } catch (Exception e) {
+            Toast.makeText(this, "No calendar app found", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    // ---- launcher shortcuts that point at the app's own pages (long-press the app icon)
+    private void setDynamicShortcuts(String json) {
+        if (Build.VERSION.SDK_INT < 25) return;
+        try {
+            JSONArray a = new JSONArray(json);
+            ShortcutManager sm = getSystemService(ShortcutManager.class);
+            if (sm == null) return;
+            Uri s = Uri.parse(startUrl);
+            String origin = s.getScheme() + "://" + s.getAuthority();
+            List<ShortcutInfo> list = new ArrayList<>();
+            for (int i = 0; i < a.length() && list.size() < 4; i++) {
+                JSONObject o = a.optJSONObject(i);
+                if (o == null) continue;
+                String label = o.optString("label").trim();
+                String url = o.optString("url");
+                String sid = o.optString("id", "s" + i);
+                if (label.isEmpty() || sid.isEmpty() || url.isEmpty()) continue;
+                Uri u = Uri.parse(url.startsWith("/") ? origin + url : url);
+                if (!isWeb(u) || !own.contains(norm(u.getHost()))) continue;
+                Intent in = new Intent(this, WyBuildActivity.class).setAction(Intent.ACTION_MAIN).putExtra("wybuild_url", u.toString());
+                list.add(new ShortcutInfo.Builder(this, sid.length() > 40 ? sid.substring(0, 40) : sid)
+                        .setShortLabel(label.length() > 12 ? label.substring(0, 12) : label)
+                        .setLongLabel(label.length() > 25 ? label.substring(0, 25) : label)
+                        .setIcon(Icon.createWithResource(this, getApplicationInfo().icon))
+                        .setIntent(in).build());
+            }
+            sm.setDynamicShortcuts(list);
+        } catch (Exception ignored) {
+            // ignore malformed shortcut lists
+        }
+    }
+
+    // ---- local reminders: AlarmManager (inexact, no exact-alarm permission). They do not survive a phone restart.
+    private int reminderCode(String id) {
+        return id.hashCode() & 0x7fffffff;
+    }
+
+    private void scheduleReminder(String id, String title, String body, String url, long at) {
+        long now = System.currentTimeMillis();
+        if (!has("reminders")) { result(id, false, "disabled"); return; }
+        if (title == null || title.isEmpty() || at < now + 1000L || at > now + 366L * 24 * 3600 * 1000) { result(id, false, "bad_time"); return; }
+        if (Build.VERSION.SDK_INT >= 33 && !granted(Manifest.permission.POST_NOTIFICATIONS)) {
+            requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, REQ_REMIND_PERM);
+            result(id, false, "permission_requested");
+            return;
+        }
+        try {
+            Intent i = new Intent().setClassName(this, getPackageName() + ".WyBuildReminderReceiver");
+            i.putExtra("title", title.length() > 100 ? title.substring(0, 100) : title);
+            i.putExtra("body", body == null ? "" : (body.length() > 300 ? body.substring(0, 300) : body));
+            String safe = startUrl;
+            Uri tu = url == null ? null : Uri.parse(url.startsWith("/") ? Uri.parse(startUrl).getScheme() + "://" + Uri.parse(startUrl).getAuthority() + url : url);
+            if (tu != null && isWeb(tu) && "internal".equals(resolve(tu))) safe = tu.toString();
+            i.putExtra("url", safe);
+            PendingIntent pi = PendingIntent.getBroadcast(this, reminderCode(id), i, PendingIntent.FLAG_UPDATE_CURRENT | (Build.VERSION.SDK_INT >= 23 ? PendingIntent.FLAG_IMMUTABLE : 0));
+            AlarmManager am = (AlarmManager) getSystemService(Context.ALARM_SERVICE);
+            if (am == null) { result(id, false, "unavailable"); return; }
+            am.set(AlarmManager.RTC_WAKEUP, at, pi);
+            result(id, true, null);
+        } catch (Exception e) {
+            result(id, false, "failed");
+        }
+    }
+
+    private void cancelReminder(String id) {
+        try {
+            Intent i = new Intent().setClassName(this, getPackageName() + ".WyBuildReminderReceiver");
+            PendingIntent pi = PendingIntent.getBroadcast(this, reminderCode(id), i, PendingIntent.FLAG_NO_CREATE | (Build.VERSION.SDK_INT >= 23 ? PendingIntent.FLAG_IMMUTABLE : 0));
+            AlarmManager am = (AlarmManager) getSystemService(Context.ALARM_SERVICE);
+            if (pi != null && am != null) {
+                am.cancel(pi);
+                pi.cancel();
+            }
+        } catch (Exception ignored) {
+            // ignore
+        }
+    }
+
+    // ---- save a generated file (blob / base64) into the Downloads folder
+    private static String safeFileName(String n) {
+        String x = n == null ? "" : n.replaceAll("[^A-Za-z0-9._ -]", "_").trim();
+        while (x.startsWith(".")) x = x.substring(1);
+        if (x.length() > 80) x = x.substring(x.length() - 80);
+        return x.isEmpty() ? "download" : x;
+    }
+
+    private void saveFile(final String id, String name, String mime, String b64) {
+        if (b64 == null || b64.isEmpty()) { result(id, false, "empty"); return; }
+        if (b64.length() > 14000000) { result(id, false, "too_large"); return; }
+        final String safe = safeFileName(name);
+        final String type = mime == null || mime.isEmpty() ? "application/octet-stream" : mime;
+        final String data = b64.startsWith("data:") && b64.indexOf(',') > 0 ? b64.substring(b64.indexOf(',') + 1) : b64;
+        new Thread(new Runnable() {
+            @Override
+            @SuppressWarnings("deprecation")
+            public void run() {
+                try {
+                    byte[] bytes = Base64.decode(data, Base64.DEFAULT);
+                    if (Build.VERSION.SDK_INT >= 29) {
+                        ContentValues v = new ContentValues();
+                        v.put(MediaStore.Downloads.DISPLAY_NAME, safe);
+                        v.put(MediaStore.Downloads.MIME_TYPE, type);
+                        v.put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS);
+                        Uri u = getContentResolver().insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, v);
+                        if (u == null) throw new Exception("insert failed");
+                        java.io.OutputStream os = getContentResolver().openOutputStream(u);
+                        try { os.write(bytes); } finally { os.close(); }
+                    } else {
+                        if (!granted(Manifest.permission.WRITE_EXTERNAL_STORAGE) || !declared(Manifest.permission.WRITE_EXTERNAL_STORAGE)) {
+                            result(id, false, "storage_permission");
+                            return;
+                        }
+                        java.io.File dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS);
+                        dir.mkdirs();
+                        java.io.FileOutputStream os = new java.io.FileOutputStream(new java.io.File(dir, safe));
+                        try { os.write(bytes); } finally { os.close(); }
+                    }
+                    runOnUiThread(new Runnable() {
+                        @Override
+                        public void run() { Toast.makeText(WyBuildActivity.this, "Saved " + safe + " to Downloads", Toast.LENGTH_SHORT).show(); }
+                    });
+                    result(id, true, null, "name", safe);
+                } catch (Exception e) {
+                    result(id, false, "failed");
+                }
+            }
+        }).start();
+    }
+
     // ------------------------------------------------------------------ JavaScript bridge: window.WyBuildNative
     private final class Bridge {
         @JavascriptInterface
@@ -925,6 +1436,199 @@ public class WyBuildActivity extends Activity {
             runOnUiThread(new Runnable() {
                 public void run() { postNotification(title, body, url); }
             });
+        }
+
+        // ---- everything below answers only pages served from the app's own hosts (see trusted())
+        @JavascriptInterface
+        public String features() {
+            if (!trusted()) return "[]";
+            return new JSONArray(nf).toString();
+        }
+
+        @JavascriptInterface
+        public String deviceInfo() {
+            return trusted() ? deviceInfoJson().toString() : "{}";
+        }
+
+        @JavascriptInterface
+        public void copyText(final String text) {
+            if (!trusted() || text == null || text.length() > 200000) return;
+            runOnUiThread(new Runnable() {
+                public void run() { copyNow(text); }
+            });
+        }
+
+        @JavascriptInterface
+        public void readClipboard(final String id) {
+            if (!trusted()) return;
+            final String rid = capId(id);
+            runOnUiThread(new Runnable() {
+                public void run() { WyBuildActivity.this.readClipboard(rid); }
+            });
+        }
+
+        @JavascriptInterface
+        public void haptic(final String kind) {
+            if (!trusted()) return;
+            runOnUiThread(new Runnable() {
+                public void run() { hapticNow(kind); }
+            });
+        }
+
+        @JavascriptInterface
+        public void keepAwake(final boolean on) {
+            if (!trusted()) return;
+            runOnUiThread(new Runnable() {
+                public void run() {
+                    if (on) getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                    else getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                }
+            });
+        }
+
+        @JavascriptInterface
+        public void setSecure(final boolean on) {
+            if (!trusted()) return;
+            runOnUiThread(new Runnable() {
+                public void run() {
+                    if (on) getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE);
+                    else getWindow().clearFlags(WindowManager.LayoutParams.FLAG_SECURE);
+                }
+            });
+        }
+
+        @JavascriptInterface
+        public void setOrientation(final String mode) {
+            if (!trusted()) return;
+            runOnUiThread(new Runnable() {
+                public void run() {
+                    if ("portrait".equals(mode)) setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT);
+                    else if ("landscape".equals(mode)) setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
+                    else setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED);
+                }
+            });
+        }
+
+        @JavascriptInterface
+        public void openAppSettings() {
+            if (!trusted()) return;
+            runOnUiThread(new Runnable() {
+                public void run() {
+                    try {
+                        startActivity(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", getPackageName(), null)));
+                    } catch (Exception ignored) {
+                        // ignore
+                    }
+                }
+            });
+        }
+
+        @JavascriptInterface
+        public void rateApp() {
+            if (!trusted()) return;
+            runOnUiThread(new Runnable() {
+                public void run() { openRate(); }
+            });
+        }
+
+        @JavascriptInterface
+        public String biometricStatus() {
+            return trusted() ? WyBuildActivity.this.biometricStatus() : "unsupported";
+        }
+
+        @JavascriptInterface
+        public void biometricAuth(final String id, final String title, final String subtitle) {
+            if (!trusted()) return;
+            final String rid = capId(id);
+            runOnUiThread(new Runnable() {
+                public void run() { WyBuildActivity.this.biometricAuth(rid, title, subtitle); }
+            });
+        }
+
+        @JavascriptInterface
+        public void listen(final String id, final String lang) {
+            if (!trusted()) return;
+            final String rid = capId(id);
+            runOnUiThread(new Runnable() {
+                public void run() { startListening(rid, lang); }
+            });
+        }
+
+        @JavascriptInterface
+        public void speak(final String text, final String lang) {
+            if (!trusted() || text == null || text.isEmpty()) return;
+            final String t = text.length() > 4000 ? text.substring(0, 4000) : text;
+            runOnUiThread(new Runnable() {
+                public void run() { speakNow(t, lang); }
+            });
+        }
+
+        @JavascriptInterface
+        public void stopSpeaking() {
+            if (!trusted()) return;
+            runOnUiThread(new Runnable() {
+                public void run() { if (tts != null) tts.stop(); }
+            });
+        }
+
+        @JavascriptInterface
+        public void pickContact(final String id) {
+            if (!trusted()) return;
+            final String rid = capId(id);
+            runOnUiThread(new Runnable() {
+                public void run() { WyBuildActivity.this.pickContact(rid); }
+            });
+        }
+
+        @JavascriptInterface
+        public void addToCalendar(final String title, final String description, final String location, final double startMs, final double endMs) {
+            if (!trusted() || title == null || title.isEmpty() || startMs <= 0) return;
+            runOnUiThread(new Runnable() {
+                public void run() { addCalendarEvent(title, description == null ? "" : description, location == null ? "" : location, (long) startMs, (long) endMs); }
+            });
+        }
+
+        @JavascriptInterface
+        public void setShortcuts(final String json) {
+            if (!trusted() || json == null || json.length() > 8000) return;
+            runOnUiThread(new Runnable() {
+                public void run() { setDynamicShortcuts(json); }
+            });
+        }
+
+        @JavascriptInterface
+        public void scheduleReminder(final String id, final String title, final String body, final String url, final double atMs) {
+            if (!trusted()) return;
+            final String rid = capId(id);
+            runOnUiThread(new Runnable() {
+                public void run() { WyBuildActivity.this.scheduleReminder(rid, title, body, url, (long) atMs); }
+            });
+        }
+
+        @JavascriptInterface
+        public void cancelReminder(final String id) {
+            if (!trusted()) return;
+            final String rid = capId(id);
+            runOnUiThread(new Runnable() {
+                public void run() { WyBuildActivity.this.cancelReminder(rid); }
+            });
+        }
+
+        @JavascriptInterface
+        public void saveFile(final String id, final String name, final String mime, final String base64) {
+            if (!trusted()) return;
+            final String rid = capId(id);
+            runOnUiThread(new Runnable() {
+                public void run() { WyBuildActivity.this.saveFile(rid, name, mime, base64); }
+            });
+        }
+
+        @JavascriptInterface
+        public String takeSharedContent() {
+            if (!trusted() || pendingShare == null) return "";
+            String s = pendingShare.toString();
+            pendingShare = null;
+            return s;
         }
     }
 }
