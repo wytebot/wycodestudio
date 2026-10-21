@@ -45,6 +45,17 @@ if standalone:
     # A TWA lets Chrome do the networking; our own WebView needs these itself or every page fails to load.
     wanted += ["android.permission.INTERNET", "android.permission.ACCESS_NETWORK_STATE"]
 features = cfg.get("features", {}) or {}
+# Native bridge features (standalone shell only). BASE needs no permission and no manifest entry, so every build gets it;
+# OPT-IN features touch the manifest (permission, intent filter or receiver), so they exist only when the developer selects them.
+NATIVE_BASE = ["clipboard", "haptics", "keepawake", "deviceinfo", "orientation", "lifecycle", "calendar", "contacts", "rate",
+               "securescreen", "savefile", "shortcuts", "speech"]
+NATIVE_OPTIN = ["biometric", "sharetarget", "reminders"]
+opted = [f for f in dict.fromkeys(extras.get("nativeFeatures") or []) if f in NATIVE_OPTIN]
+native_features = (NATIVE_BASE + opted) if standalone else []
+if standalone and "biometric" in opted:
+    wanted.append("android.permission.USE_BIOMETRIC")
+if standalone and "reminders" in opted:
+    wanted.append("android.permission.POST_NOTIFICATIONS")
 if cfg.get("enableNotifications"):
     # Android 13+ will not show ANY notification, and cannot even ask, unless the app declares this
     wanted.append("android.permission.POST_NOTIFICATIONS")
@@ -223,6 +234,7 @@ if standalone:
         "navigationColor": cfg.get("navigationColor") or cfg.get("themeColor", "#FFFFFF"),
         "ownHosts": own_hosts(),
         "rules": [js_rule_cfg(r) for r in link_rules],
+        "nativeFeatures": native_features,
     }, open(os.path.join(assets, "wybuild-config.json"), "w", encoding="utf8"), indent=2)
 
     values = os.path.join(proj, "app", "src", "main", "res", "values")
@@ -294,6 +306,47 @@ if standalone:
     old = open(pg, encoding="utf8").read() if os.path.exists(pg) else ""
     if "WyBuild standalone shell" not in old:
         open(pg, "a", encoding="utf8").write(keep)
+    # ---- opt-in features that need manifest entries. Fail loudly: a selected feature must really be in the build.
+    def activity_span():
+        m = re.search(r'<activity\b[^>]*android:name="%s"[^>]*>' % re.escape(native_name), xml)
+        if not m or m.group(0).rstrip().endswith("/>"):
+            raise SystemExit("Could not find the WyBuildActivity element to attach native features to")
+        end = xml.find("</activity>", m.end())
+        if end < 0:
+            raise SystemExit("WyBuildActivity element is not closed")
+        return end
+
+    if "sharetarget" in opted:
+        end = activity_span()
+        xml = xml[:end] + (
+            '    <intent-filter>\n'
+            '                <action android:name="android.intent.action.SEND" />\n'
+            '                <category android:name="android.intent.category.DEFAULT" />\n'
+            '                <data android:mimeType="text/plain" />\n'
+            '            </intent-filter>\n        ') + xml[end:]
+        applied.append("share target: the app appears in Android's Share sheet for text")
+    if "biometric" in opted:
+        applied.append("biometric unlock (platform BiometricPrompt, USE_BIOMETRIC)")
+    # WyBuildActivity references the receiver class, so its source must ALWAYS be compiled in.
+    # It is only registered in the manifest (and therefore only ever runs) when Reminders is selected.
+    rt = os.path.join(here, "WyBuildReminderReceiver.java")
+    if not os.path.exists(rt):
+        raise SystemExit("WyBuildReminderReceiver.java is missing next to twa-native.py. Reinstall the WyBuild TWA workflow (WyBuild > Web to Android > Update workflow).")
+    open(os.path.join(src_dir, "WyBuildReminderReceiver.java"), "w", encoding="utf8").write(open(rt, encoding="utf8").read().replace("__PACKAGE__", pkg_id))
+    if "reminders" in opted:
+        recv = '    <receiver android:name="%s.WyBuildReminderReceiver" android:exported="false" />\n' % pkg_id
+        xml, n = re.subn(r"</application>", lambda m: recv + "    </application>", xml, count=1)
+        if not n:
+            raise SystemExit("AndroidManifest.xml has no </application>")
+        applied.append("local reminders (AlarmManager + notification receiver)")
+    # Text-to-speech needs package visibility on Android 11+
+    tts_q = '    <queries>\n        <intent><action android:name="android.intent.action.TTS_SERVICE" /></intent>\n    </queries>\n'
+    if "TTS_SERVICE" not in xml:
+        if "<queries>" in xml:
+            xml = xml.replace("<queries>", "<queries>\n        <intent><action android:name=\"android.intent.action.TTS_SERVICE\" /></intent>", 1)
+        else:
+            add_before_application(tts_q)
+    applied.append("native bridge: " + ", ".join(native_features))
     applied.append("standalone app shell: your site runs inside the app's own WebView, so there is no address bar or Chrome toolbar and no Digital Asset Links dependency")
     applied.append("native file upload, downloads, camera/microphone/location prompts, JS dialogs, fullscreen video, offline screen, back button")
     if (features.get("playBilling") or {}).get("enabled"):
@@ -604,6 +657,114 @@ else:
     "- `WyBuildLinks.open(url)` applies the same rules from your own JavaScript.\n"
 )
 open(kit + "/NATIVE-FEATURES.md", "a", encoding="utf8").write(doc)
+
+# ---------------------------------------------------------------- 8. native bridge kit (ships in the build artifact)
+if standalone:
+    open(kit + "/wybuild-native.js", "w", encoding="utf8").write(r"""/*! WyBuild native helper. Add to your website: <script src="/wybuild-native.js" defer></script>
+ * Inside the Android app each call uses the real Android feature. In a normal browser it falls back to the web API
+ * where one exists, or rejects with code "unsupported", so one codebase serves both.
+ *
+ *   WyBuild.isApp()   WyBuild.has('biometric')   await WyBuild.device()
+ *   WyBuild.clipboard.write(text) / .read()      WyBuild.haptic('tick'|'click'|'heavy'|'success'|'error')
+ *   WyBuild.keepAwake(true)   WyBuild.secureScreen(true)   WyBuild.orientation('portrait'|'landscape'|'auto')
+ *   WyBuild.biometric.status()  /  .authenticate({ title, subtitle })   // local unlock only, NOT proof of identity to your server
+ *   WyBuild.speech.listen({ lang })  /  .speak(text, { lang })  /  .stop()
+ *   WyBuild.contacts.pick()              // one contact the user taps; no contacts permission needed
+ *   WyBuild.calendar.add({ title, description, location, start, end })   // start/end: Date or ms
+ *   WyBuild.shortcuts.set([{ id, label, url }])                          // long-press the app icon; own pages only, max 4
+ *   WyBuild.reminders.schedule({ id, title, body, url, at }) / .cancel(id)   // needs the Reminders feature; lost on phone restart
+ *   WyBuild.files.save(name, mime, blobOrBase64)                          // into Downloads
+ *   WyBuild.share.onReceive(fn)          // text shared to your app from other apps (needs the Share target feature)
+ *   WyBuild.rate()   WyBuild.openSettings()   WyBuild.on('network'|'lifecycle', fn)
+ */
+(function () {
+  var N = window.WyBuildNative;
+  var pending = {}, seq = 0;
+  function fail(code) { var e = new Error(code); e.code = code; return Promise.reject(e); }
+  function inApp() { return !!(N && N.isApp && N.isApp()); }
+  function feats() { try { return inApp() ? JSON.parse(N.features() || '[]') : []; } catch (e) { return []; } }
+  window.addEventListener('wybuild:result', function (ev) {
+    var d = ev.detail || {}, p = pending[d.id];
+    if (!p) return;
+    delete pending[d.id];
+    if (d.ok) p.resolve(d); else { var e = new Error(d.error || 'failed'); e.code = d.error || 'failed'; p.reject(e); }
+  });
+  function ask(fn) {
+    return new Promise(function (resolve, reject) {
+      var id = 'r' + (++seq) + '_' + Date.now();
+      pending[id] = { resolve: resolve, reject: reject };
+      try { fn(id); } catch (e) { delete pending[id]; reject(e); }
+    });
+  }
+  function ms(v) { return v instanceof Date ? v.getTime() : Number(v) || 0; }
+  function toBase64(x) {
+    if (typeof x === 'string') return Promise.resolve(x);
+    return new Promise(function (resolve, reject) {
+      var r = new FileReader();
+      r.onload = function () { resolve(String(r.result)); };
+      r.onerror = function () { reject(new Error('read failed')); };
+      r.readAsDataURL(x);
+    });
+  }
+  var W = window.WyBuild = {
+    isApp: inApp,
+    features: feats,
+    has: function (n) { return feats().indexOf(n) !== -1; },
+    device: function () { return Promise.resolve(inApp() ? JSON.parse(N.deviceInfo() || '{}') : { platform: 'web', online: navigator.onLine }); },
+    on: function (name, fn) { window.addEventListener('wybuild:' + name, function (e) { fn(e.detail); }); },
+    clipboard: {
+      write: function (t) { if (inApp()) { N.copyText(String(t)); return Promise.resolve(); } return navigator.clipboard ? navigator.clipboard.writeText(String(t)) : fail('unsupported'); },
+      read: function () { return inApp() ? ask(function (id) { N.readClipboard(id); }).then(function (d) { return d.text; }) : (navigator.clipboard && navigator.clipboard.readText ? navigator.clipboard.readText() : fail('unsupported')); }
+    },
+    haptic: function (k) { if (inApp()) N.haptic(k || 'click'); else if (navigator.vibrate) navigator.vibrate(k === 'heavy' ? 40 : 15); },
+    keepAwake: function (on) { if (inApp()) N.keepAwake(!!on); },
+    secureScreen: function (on) { if (inApp()) N.setSecure(!!on); },
+    orientation: function (m) { if (inApp()) N.setOrientation(m || 'auto'); },
+    rate: function () { if (inApp()) N.rateApp(); },
+    openSettings: function () { if (inApp()) N.openAppSettings(); },
+    biometric: {
+      status: function () { return Promise.resolve(inApp() ? N.biometricStatus() : 'unsupported'); },
+      authenticate: function (o) { o = o || {}; return inApp() ? ask(function (id) { N.biometricAuth(id, o.title || '', o.subtitle || ''); }).then(function () { return true; }) : fail('unsupported'); }
+    },
+    speech: {
+      listen: function (o) { return inApp() ? ask(function (id) { N.listen(id, (o && o.lang) || ''); }) : fail('unsupported'); },
+      speak: function (t, o) { if (inApp()) N.speak(String(t), (o && o.lang) || ''); else if (window.speechSynthesis) speechSynthesis.speak(new SpeechSynthesisUtterance(String(t))); },
+      stop: function () { if (inApp()) N.stopSpeaking(); else if (window.speechSynthesis) speechSynthesis.cancel(); }
+    },
+    contacts: { pick: function () { return inApp() ? ask(function (id) { N.pickContact(id); }) : fail('unsupported'); } },
+    calendar: { add: function (e) { if (!inApp()) return fail('unsupported'); N.addToCalendar(e.title || '', e.description || '', e.location || '', ms(e.start), ms(e.end)); return Promise.resolve(); } },
+    shortcuts: { set: function (list) { if (inApp()) N.setShortcuts(JSON.stringify(list || [])); } },
+    reminders: {
+      schedule: function (r) { return inApp() ? ask(function (id) { N.scheduleReminder(String(r.id || id), r.title || '', r.body || '', r.url || '/', ms(r.at)); }) : fail('unsupported'); },
+      cancel: function (id) { if (inApp()) N.cancelReminder(String(id)); }
+    },
+    files: { save: function (name, mime, data) { return inApp() ? toBase64(data).then(function (b) { return ask(function (id) { N.saveFile(id, name, mime || '', b); }); }) : fail('unsupported'); } },
+    share: {
+      onReceive: function (fn) {
+        function take() { try { var t = N.takeSharedContent(); if (t) fn(JSON.parse(t)); } catch (e) {} }
+        if (!inApp()) return;
+        take();
+        window.addEventListener('wybuild:share', take);
+      }
+    }
+  };
+})();
+""")
+    open(kit + "/NATIVE-FEATURES.md", "a", encoding="utf8").write("""
+## Native bridge (`wybuild-native.js`)
+This build includes: %s.
+Put `wybuild-native.js` from this folder at your site root and add `<script src="/wybuild-native.js" defer></script>`.
+The bridge answers only pages served from your own site (and domains you set to Internal), never third-party frames or sign-in pages.
+
+### Google Play and other stores: what actually counts
+Stores do not look for a feature list in the manifest. Google Play's *Minimum functionality* and *Spam* policies are judged by a
+reviewer using the app: it must offer value beyond opening a website, and the permissions it declares must be used.
+- Wire the bridge into screens users really use (biometric unlock on a private area, share-to-app, reminders, saving files, voice input, calendar add).
+- Do not declare or enable features you do not use: unused permissions are a common rejection reason.
+- Wrapping a site you do not own or control is rejected under the *Spam and Minimum Functionality* policy regardless of features.
+- Biometric success is a local unlock gate. Never treat it as proof of identity to your server.
+""" % ", ".join(native_features))
+    open(out + "/dist/NATIVE-BRIDGE.txt", "w", encoding="utf8").write("\n".join(native_features) + "\n")
 
 # ---------------------------------------------------------------- summary
 print("Android features applied:", ", ".join(applied) or "none")
