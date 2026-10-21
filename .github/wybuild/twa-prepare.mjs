@@ -110,7 +110,7 @@ const json = {
   // 'customtabs' or 'webview'; use WebView as the safety fallback, while TWA keeps Custom Tabs.
   fallbackType: raw.shell === 'twa' ? 'customtabs' : 'webview',
   features,
-  minSdkVersion: Math.max(21, Number(raw.minSdkVersion) || 21),
+  minSdkVersion: Math.max(24, Number(raw.minSdkVersion) || 24), // androidbrowserhelper 2.7.x needs 24
   orientation,
   additionalTrustedOrigins: [...trusted],
   fingerprints: raw.expectedFingerprint ? [{ value: String(raw.expectedFingerprint).replace(/:/g,'').toUpperCase() }] : [],
@@ -126,6 +126,8 @@ const extras = {
   shell: raw.shell === 'twa' ? 'twa' : 'standalone',
   linkRules,
   predictiveBack: raw.predictiveBack === true,
+  // opt-in native bridge features (the always-on set is defined in twa-native.py)
+  nativeFeatures: (Array.isArray(raw.nativeFeatures) ? raw.nativeFeatures : []).filter(f => ['biometric', 'sharetarget', 'reminders'].includes(f)),
   playSigningFingerprint: /^([0-9A-Fa-f]{2}:?){32}$/.test(String(raw.playSigningFingerprint || '')) ? String(raw.playSigningFingerprint).replace(/:/g, '').toUpperCase().match(/.{2}/g).join(':') : '',
 };
 await fs.writeFile(`${out}/wybuild-extras.json`, JSON.stringify(extras, null, 2));
